@@ -12,10 +12,12 @@
 - `npm start` — Vite dev server. Confirmed working (serves `HTTP 200`).
 - `npm run build` — `tsc` (type-only, `noEmit: true` in `tsconfig.json`) then
   `vite build` to `dist/`. Confirmed passing on the untouched starter.
-- **No test script/framework is configured yet.** If real unit tests become
-  necessary (e.g. for wave-physics math functions), that decision and the
-  framework choice (Vitest is the natural fit for a Vite project) should be
-  raised explicitly, not silently added.
+- **No test script/framework is installed yet, but the choice is settled:**
+  Vitest, pinned to `^3.2.7` (not a bare/`latest` install — `latest` requires
+  Vite ^6/7/8 and is incompatible with the installed Vite `5.4.21`). See
+  `multi-sim-architecture.md`'s "Testing strategy" section for the exact
+  `package.json`/`vite.config.js` changes and what to test first (pure
+  functions in `src/common/physics/`).
 - `npx tsc --noEmit` and `npx eslint .` can be run directly for a fast
   check without a full Vite build.
 
@@ -34,31 +36,46 @@ skill) rather than inferred from passing typecheck/build alone.
 
 ## Project structure conventions
 
+Current (one starter screen):
+
 ```
 src/
   init.ts, assert.ts, splash.ts, brand.ts, main.ts   # fixed bootstrap chain
-  <screen-name>/
-    <ScreenName>Screen.ts
-    model/<ScreenName>Model.ts
-    view/<ScreenName>ScreenView.ts
-  common/                # (not yet created) shared code used by 2+ sims
+  screen-name/
+    SimScreen.ts
+    model/SimModel.ts
+    view/SimScreenView.ts
 ```
 
-To add a new screen for one of the three simulations:
+Target, once the three simulations are scaffolded (confirmed architecture,
+see `multi-sim-architecture.md` — not yet applied):
 
-1. Create `src/<sim-name>/{<Sim>Screen.ts, model/<Sim>Model.ts,
-   view/<Sim>ScreenView.ts}` mirroring `src/screen-name/`.
-2. Model class: plain TypeScript, Axon `Property`s for all observable state,
-   `reset()` and `step(dt)` methods, no imports from `scenery`/`sun`/
-   `scenery-phet`.
-3. View class: extends `ScreenView`, builds the scene graph from Nodes bound
+```
+sound-waves.html, standing-waves.html, kundt-tube.html   # independent entries
+src/
+  common/{physics/, view/}       # shared only once genuinely shared, see multi-sim-architecture.md
+  sound-waves/{init.ts, assert.ts, splash.ts, brand.ts, main.ts, model/, view/}
+  standing-waves/{...}            # mirrors sound-waves/
+  kundt-tube/{...}                 # mirrors sound-waves/
+```
+
+To add a new simulation:
+
+1. Create `src/<sim-name>/{init.ts, assert.ts, splash.ts, brand.ts, main.ts,
+   <Sim>Screen.ts, model/<Sim>Model.ts, view/<Sim>ScreenView.ts}` mirroring
+   `src/screen-name/` — each simulation is its own single-screen `Sim` with
+   its own bootstrap chain and unique `init()` name/title, **not** a `Screen`
+   added to one shared `Sim` (see `multi-sim-architecture.md` for why).
+2. Add the corresponding HTML entry (`<sim-name>.html`) and register it in
+   `vite.config.js`'s `build.rollupOptions.input`.
+3. Model class: plain TypeScript, Axon `Property`s for all observable state,
+   `reset()` and a `step(dt)` method if the model is time-dependent — Joist
+   calls it automatically (see `architecture.md`'s confirmed stepping
+   section); no imports from `scenery`/`sun`/`scenery-phet`.
+4. View class: extends `ScreenView`, builds the scene graph from Nodes bound
    to the model's Properties, wires a `ResetAllButton`, implements its own
-   `step(dt)` and `reset()` for view-local state (see `architecture.md` for
-   the model/view step coupling caveat).
-4. Register the new `Screen` in `main.ts`'s `screens` array (each simulation
-   will likely be its own separate `Sim`/entry point rather than screens of
-   one combined app — confirm this decision before scaffolding multiple sims
-   into a single `Sim`).
+   `step(dt)` only for view-local (non-physics) animation — never call
+   `model.step(dt)` from the view, Joist already does.
 5. Run the verification commands above.
 
 Only promote code to `src/common/` once at least two of the three simulations

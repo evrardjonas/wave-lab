@@ -61,6 +61,11 @@ physics or simulation state. See `references/architecture.md`.
 
 - **`references/architecture.md`** — model/view separation, Sim/Screen/ScreenView,
   this project's file layout and load order, stepping/time evolution, reset.
+- **`references/multi-sim-architecture.md`** — the confirmed, settled plan for
+  three independently launchable/embeddable sims in this repo: repository
+  tree, build strategy, embeddability constraints, shared-code boundary, and
+  testing strategy. Read this before scaffolding Sound Waves, Standing Waves,
+  or Kundt Tube, or touching `vite.config.js`/`package.json`.
 - **`references/api-patterns.md`** — Axon Property family, Dot/Kite math types,
   the `optionize` options pattern, import styles, Tandem basics. Includes a
   documented case where the official guide's example code doesn't match the
@@ -79,7 +84,10 @@ physics or simulation state. See `references/architecture.md`.
 
 - TypeScript, `strict: true` (see `tsconfig.json`). No `any` without a documented reason.
 - One screen so far: `src/screen-name/{SimScreen.ts, model/SimModel.ts, view/SimScreenView.ts}`.
-  New screens/sims should follow this `model/` + `view/` split per screen.
+  The three eventual simulations will each be their own single-screen `Sim`
+  entry point (not three `Screen`s of one `Sim`) — see
+  `references/multi-sim-architecture.md` for the confirmed reasoning and
+  target repository tree. Each follows the same `model/` + `view/` split.
 - Load order is fixed and must not be reordered: `init.ts` → `assert.ts` →
   `splash.ts` → `brand.ts` → everything else in `main.ts`.
 - SI units internally in all models; convert only at the view/display boundary.

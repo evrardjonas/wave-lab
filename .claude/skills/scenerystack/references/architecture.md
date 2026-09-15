@@ -68,22 +68,46 @@ of Sound Waves / Standing Waves / Kundt Tube belongs in a top-level `src/common/
 (or similar) directory once it is genuinely shared — do not create that
 abstraction preemptively (see `development-workflow.md`).
 
-## Stepping / time evolution
+## Stepping / time evolution (CONFIRMED against installed source — see exact call chain)
 
-- `Sim`/`Display` drives a `requestAnimationFrame` loop and calls each active
-  `Screen`'s model and view `step(dt)` methods once initialized (this is Joist
-  internal behavior, not something application code wires up manually).
-- **Assumption to verify per-screen, not a documented guarantee**: the
-  generated starter's `SimScreenView.step(dt)` currently animates its own
-  `rotatingRectangle` directly and does not call `model.step(dt)`. Once models
-  carry real time-dependent physics state (e.g. wave phase), the view's
-  `step(dt)` must not silently diverge from the model's own `step(dt)` — either
-  call `model.step(dt)` explicitly from the view's `step`, or rely on
-  Screen/Sim to call both independently (confirm behavior in
-  `joist/js/Sim.ts` / `Screen.ts` before assuming either).
+Verified directly in `node_modules/scenerystack/src/joist/js/Sim.ts` (no longer
+an inferred assumption). The loop, once per animation frame:
+
+1. `runAnimationLoop()` (`Sim.ts:1060-1082`) re-schedules itself via
+   `requestAnimationFrame` and, only while `activeProperty.value` is true and
+   not in playback mode, calls `stepOneFrame()` → `stepSimulation(dt)`.
+2. `stepSimulation`'s implementation (`Sim.ts:448-506`) operates on the
+   **currently selected/active screen only** — inactive screens are not
+   stepped at all. `dt` is capped to that screen's `maxDT`
+   (`ScreenOptions.maxDT`, default `0.5`, see `Screen.ts:159`).
+3. **Model step — automatic, but conditional** (`Sim.ts:477-479`):
+   ```
+   if ( screen.model.step && dt ) { screen.model.step( dt ); }
+   ```
+   `TModel.ts:10-13` declares `step?: (dt: number) => void;` as **optional**.
+   If a model doesn't define `step`, Joist silently skips it — no error, the
+   model just never advances.
+4. **View step — automatic and unconditional** (`Sim.ts:495`):
+   `screen.view.step( dt );`, always called (default no-op comes from
+   `ScreenView.ts:361-363`), right before the display paints.
+
+**The pattern for this project, settled**:
+
+- Any model with time-dependent physics **must** implement `step(dt): void` —
+  Joist calls it for you; you never drive your own `requestAnimationFrame`
+  loop or call `model.step` manually from application code.
+- A `ScreenView`'s own `step(dt)` **must not** call `model.step(dt)` — Joist
+  already calls it independently, in the same frame, before `view.step`;
+  calling it again would double-step the model. `ScreenView.step` is only for
+  view-local, non-physics animation (exactly what the starter's
+  `rotatingRectangle` does — that pattern is fine to keep as-is for pure
+  visual flourishes, just don't extend it to drive real model state).
 - `dt` is in seconds and is passed uniformly through the chain — keep model
   physics in SI units (seconds, meters, Hz) so `dt` composes directly with
   rate constants without hidden unit conversions.
+- Since each of the three planned simulations is a single-screen `Sim` (see
+  `multi-sim-architecture.md`), "active screen only" stepping is a non-issue
+  in practice — there's only ever one screen to be active.
 
 ## Reset pattern (official, matches generated code)
 
@@ -94,11 +118,20 @@ as pan/zoom). Every new model `Property` that represents user-adjustable or
 evolving state must be reset here, or the reset-all affordance becomes
 misleading — flag this explicitly during `physics-reviewer`/`qa-tester` passes.
 
+## Multi-sim repository architecture
+
+This project's three planned simulations (Sound Waves, Standing Waves, Kundt
+Tube) are each an **independent, single-screen `Sim`** — not three `Screen`s
+of one combined `Sim` — specifically to keep them independently
+launchable/embeddable. The full reasoning, confirmed constraints (a `Sim` is
+a hard page-level singleton, `Sim`/`SimDisplay` cannot be embedded in a sized
+container, only a full page in an `<iframe>`), repository tree, build
+strategy, and shared/not-shared code boundaries are recorded in
+`multi-sim-architecture.md` — read that before scaffolding any of the three
+sims or touching `vite.config.js`.
+
 ## Assumptions in this document
 
-- The "Sim calls Screen model/view step" behavior is inferred from PhET/Joist
-  conventions and the `Screen`/`ScreenView` source structure, not from a single
-  explicit doc paragraph — re-verify against `joist/js/Sim.ts` if step-related
-  bugs appear.
 - `src/common/` as a shared-code location is a suggested convention for this
-  repo, not an upstream SceneryStack requirement.
+  repo, not an upstream SceneryStack requirement; see `multi-sim-architecture.md`
+  for the confirmed boundary of what belongs there.
