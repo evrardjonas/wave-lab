@@ -10,7 +10,8 @@
     "start:kundt-tube": "npx vite --open /kundt-tube.html",
     "build": "npx tsc && npx vite build",
     "test": "npx vitest run",
-    "test:watch": "npx vitest"
+    "test:watch": "npx vitest",
+    "publish:standing-waves": "node scripts/publish-sim.mjs standing-waves"
   },
   "dependencies": {
     "scenerystack": "^3.0.0"
