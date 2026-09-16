@@ -13,6 +13,7 @@ import {
   fundamentalFrequency,
   harmonicFrequency,
   nearestHarmonic,
+  predictedHarmonics,
   predictedNodePositions,
   waveSpeed,
 } from "./StandingWavesModel.js";
@@ -63,6 +64,48 @@ describe("fundamentalFrequency / harmonicFrequency", () => {
   it("nearestHarmonic never returns less than 1", () => {
     expect(nearestHarmonic(0.001, 5, "fixed")).toBeGreaterThanOrEqual(1);
     expect(nearestHarmonic(0.001, 2.5, "free")).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("predictedHarmonics", () => {
+  it("matches harmonicFrequency for a fixed-fixed string, in order, up to maxCount", () => {
+    const fundamental = 5;
+    const harmonics = predictedHarmonics(fundamental, "fixed", 100, 6);
+    expect(harmonics).toHaveLength(6);
+    harmonics.forEach((h, i) => {
+      const n = i + 1;
+      expect(h.n).toBe(n);
+      expect(h.frequency).toBeCloseTo(harmonicFrequency(n, fundamental, "fixed"), 10);
+    });
+  });
+
+  it("matches harmonicFrequency for a fixed-free string, in order, up to maxCount", () => {
+    const fundamental = 2.5;
+    const harmonics = predictedHarmonics(fundamental, "free", 100, 6);
+    expect(harmonics).toHaveLength(6);
+    harmonics.forEach((h, i) => {
+      const n = i + 1;
+      expect(h.n).toBe(n);
+      expect(h.frequency).toBeCloseTo(harmonicFrequency(n, fundamental, "free"), 10);
+    });
+  });
+
+  it("truncates at maxFrequency, stopping before the first harmonic that would exceed it", () => {
+    const fundamental = 5; // fixed-fixed harmonics at 5, 10, 15, 20, 25, 30, ...
+    const harmonics = predictedHarmonics(fundamental, "fixed", 22, 10);
+    expect(harmonics.map((h) => h.n)).toEqual([1, 2, 3, 4]); // 20 <= 22 < 25
+  });
+
+  it("truncates at maxCount even when more harmonics would still fit under maxFrequency", () => {
+    const fundamental = 1;
+    const harmonics = predictedHarmonics(fundamental, "fixed", 1000, 3);
+    expect(harmonics.map((h) => h.n)).toEqual([1, 2, 3]);
+  });
+
+  it("returns an empty array when even n=1 exceeds maxFrequency", () => {
+    const fundamental = 50; // above maxFrequency below, even at n=1
+    const harmonics = predictedHarmonics(fundamental, "fixed", 40, 6);
+    expect(harmonics).toEqual([]);
   });
 });
 
@@ -439,6 +482,66 @@ describe("limiting cases", () => {
     const model = new StandingWavesModel();
     model.drivingFrequencyProperty.value = DRIVING_FREQUENCY_RANGE.min; // 0.5 Hz, far below any typical fundamental
     expect(model.nearestHarmonicProperty.value).toBe(1);
+  });
+});
+
+describe("nearestHarmonic stays unbounded even when it exceeds a small predictedHarmonics maxCount", () => {
+  it("nearestHarmonicProperty correctly reports n=8 while predictedHarmonics(..., maxCount=6) only lists n=1..6", () => {
+    const model = new StandingWavesModel();
+    // Minimum achievable fixed-fixed fundamental in this sim's parameter ranges (min tension, max
+    // linear density, max length), chosen so 8x it still fits under DRIVING_FREQUENCY_RANGE.max.
+    model.tensionProperty.value = TENSION_RANGE.min;
+    model.linearDensityProperty.value = LINEAR_DENSITY_RANGE.max;
+    model.lengthProperty.value = LENGTH_RANGE.max;
+    const fundamental = model.fundamentalFrequencyProperty.value;
+    const boundary = model.farBoundaryTypeProperty.value;
+
+    const n8Frequency = harmonicFrequency(8, fundamental, boundary);
+    expect(n8Frequency).toBeLessThanOrEqual(DRIVING_FREQUENCY_RANGE.max); // sanity: achievable in-range
+
+    model.drivingFrequencyProperty.value = n8Frequency;
+    expect(model.nearestHarmonicProperty.value).toBe(8);
+    expect(model.nearestHarmonicFrequencyProperty.value).toBeCloseTo(n8Frequency, 10);
+
+    const boundedList = predictedHarmonics(fundamental, boundary, DRIVING_FREQUENCY_RANGE.max, 6);
+    expect(boundedList).toHaveLength(6);
+    expect(boundedList.some((h) => h.n === 8)).toBe(false); // the true nearest harmonic isn't even in the list
+  });
+});
+
+describe("manual frequency entry clamping (Range.constrainValue - the mechanism the numeric-entry field commits through)", () => {
+  it("passes a value already inside DRIVING_FREQUENCY_RANGE through unchanged", () => {
+    const value = (DRIVING_FREQUENCY_RANGE.min + DRIVING_FREQUENCY_RANGE.max) / 2;
+    expect(DRIVING_FREQUENCY_RANGE.constrainValue(value)).toBeCloseTo(value, 10);
+  });
+
+  it("clamps a value below DRIVING_FREQUENCY_RANGE up to the minimum", () => {
+    expect(DRIVING_FREQUENCY_RANGE.constrainValue(DRIVING_FREQUENCY_RANGE.min - 5)).toBe(DRIVING_FREQUENCY_RANGE.min);
+  });
+
+  it("clamps a value above DRIVING_FREQUENCY_RANGE down to the maximum", () => {
+    expect(DRIVING_FREQUENCY_RANGE.constrainValue(DRIVING_FREQUENCY_RANGE.max + 100)).toBe(DRIVING_FREQUENCY_RANGE.max);
+  });
+});
+
+describe("driving frequency is a single Property that all input paths (slider, numeric entry, harmonic-row click, go-to-nearest) funnel through", () => {
+  it("updates nearestHarmonicProperty/nearestHarmonicFrequencyProperty consistently whenever drivingFrequencyProperty is set directly, regardless of how it was set", () => {
+    const model = new StandingWavesModel();
+    const fundamental = model.fundamentalFrequencyProperty.value;
+    const boundary = model.farBoundaryTypeProperty.value;
+
+    for (const n of [1, 2, 3, 5]) {
+      const f = harmonicFrequency(n, fundamental, boundary);
+      if (!DRIVING_FREQUENCY_RANGE.contains(f)) {
+        continue;
+      }
+      // Simulates what the numeric field (on commit), the slider (on drag), a predicted-harmonics
+      // row (on click), and "Go to Nearest Harmonic" (on click) would all ultimately do: set this
+      // one Property. There is no separate "typed frequency" Property to drift out of sync with it.
+      model.drivingFrequencyProperty.value = f;
+      expect(model.nearestHarmonicProperty.value).toBe(n);
+      expect(model.nearestHarmonicFrequencyProperty.value).toBeCloseTo(f, 10);
+    }
   });
 });
 

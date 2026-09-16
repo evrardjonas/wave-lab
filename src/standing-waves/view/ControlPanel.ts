@@ -1,7 +1,7 @@
-import { DerivedProperty, type BooleanProperty, type EnumerationProperty, type TReadOnlyProperty } from "scenerystack/axon";
+import { DerivedProperty, Multilink, type BooleanProperty, type EnumerationProperty, type TReadOnlyProperty } from "scenerystack/axon";
 import { Range } from "scenerystack/dot";
-import { HBox, Node, RichText, Text, VBox } from "scenerystack/scenery";
-import { AccordionBox, AquaRadioButtonGroup, Checkbox, OnOffSwitch, Panel } from "scenerystack/sun";
+import { DOM, HBox, Node, RichText, Text, VBox } from "scenerystack/scenery";
+import { AccordionBox, AquaRadioButtonGroup, Checkbox, OnOffSwitch, Panel, TextPushButton } from "scenerystack/sun";
 import { NumberControl, NumberDisplay, PhetFont, TimeControlNode, TimeSpeed } from "scenerystack/scenery-phet";
 import {
   AMPLITUDE_CAP_FRACTION,
@@ -10,6 +10,7 @@ import {
   LENGTH_RANGE,
   LINEAR_DENSITY_RANGE,
   TENSION_RANGE,
+  predictedHarmonics,
   type StandingWavesModel,
 } from "../model/StandingWavesModel.js";
 
@@ -19,6 +20,7 @@ const PROMINENT_LABEL_FONT = new PhetFont({ size: 13, weight: "bold" });
 const SECONDARY_TITLE_FONT = new PhetFont({ size: 12, weight: "bold" });
 const SECONDARY_LABEL_FONT = new PhetFont(11);
 const CAPTION_FONT = new PhetFont({ size: 10, style: "italic" });
+const NEAREST_HARMONIC_FONT = new PhetFont({ size: 11, weight: "bold" });
 
 const PROMINENT_PANEL_FILL = "#eaf1fb";
 const PROMINENT_PANEL_STROKE = "#a9c0e0";
@@ -26,6 +28,10 @@ const SECONDARY_PANEL_FILL = "#f5f5f5";
 const SECONDARY_PANEL_STROKE = "#cccccc";
 
 const PANEL_WIDTH = 236;
+
+// Maximum number of rows shown in the "Predicted Harmonics" picker list - a purely cosmetic UI bound
+// (see predictedHarmonics() in the model, which is deliberately unrelated to nearestHarmonic()).
+const PREDICTED_HARMONICS_LIST_MAX_COUNT = 6;
 
 // Maximum wave speed representable anywhere in this sim's parameter ranges - c = sqrt(T/mu), and
 // c is maximized by the largest tension and the smallest linear density. Used only to bound the
@@ -39,6 +45,115 @@ function ordinal(n: number): string {
   const remainder100 = n % 100;
   const suffix = remainder100 >= 11 && remainder100 <= 13 ? "th" : (suffixes[n % 10] ?? "th");
   return `${n}${suffix}`;
+}
+
+/**
+ * A minimal editable numeric text field for the driving frequency, backed by a real HTML <input>
+ * wrapped in a Scenery DOM node. No higher-level SceneryStack component supports free-text numeric
+ * entry: scenery-phet's NumberDisplay/NumberControl are display+slider only (no typing), and sun's
+ * NumberSpinner (checked via node_modules/scenerystack/src/sun/js/NumberSpinner.ts) requires integer
+ * values and only supports incrementing/decrementing (by mouse, or arrow/home/end keys) - not typing
+ * an arbitrary decimal value. scenery-phet also has a Keypad/KeypadDialog (virtual on-screen keypad in
+ * a modal), but that's a click-driven modal, not the inline "type a number in this row" field this
+ * spec calls for, and a real <input> gets native text editing, IME, and screen-reader support for free.
+ *
+ * Two-way bound to drivingFrequencyProperty: typing updates the model only on commit (blur/Enter);
+ * any external change to the Property (slider drag, a harmonic-row click, "Go to Nearest Harmonic")
+ * updates the displayed text, unless the field currently has focus (so a live external update never
+ * fights a student mid-keystroke).
+ */
+function createFrequencyEntryField(model: StandingWavesModel): Node {
+  const helpText = `Type an exact frequency in Hertz. Values outside ${DRIVING_FREQUENCY_RANGE.min}–${DRIVING_FREQUENCY_RANGE.max} Hz are adjusted to fit.`;
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.inputMode = "decimal";
+  input.size = 5;
+  input.style.font = SECONDARY_LABEL_FONT.getFont();
+  input.style.textAlign = "right";
+  input.setAttribute("aria-label", "Driving Frequency (Hz)");
+  input.title = helpText; // mouse-hover hint, in addition to the aria-describedby below
+
+  // --- Known accessibility limitation: keyboard tab order, not screen-reader reading order ---
+  //
+  // Confirmed by inspecting the installed source (node_modules/scenerystack/src/scenery/js/nodes/DOM.ts,
+  // .../display/Display.ts, .../accessibility/pdom/PDOMSiblingStyle.js) and live DOM inspection: a Scenery
+  // `DOM` node renders its wrapped element through the DOM-block rendering pipeline
+  // (DOM.createDOMDrawable -> DOMBlock), which is a sibling of, but structurally and permanently SEPARATE
+  // from, the accessible tree Scenery calls the PDOM ("a11y-pdom-root", appended once to the Display's root
+  // element in Display.ts around `this._domElement.appendChild(this._rootPDOMInstance.peer!.primarySibling!)`).
+  // `Node.pdomOrder` only reorders elements that are already inside that PDOM subtree - it cannot pull in an
+  // element that was never part of it, so it cannot fix this.
+  //
+  // The only way for a *visible* native <input> to genuinely live inside the PDOM tree (and thus get a
+  // correct, position-aware tab/reading order for free) is a `tagName: 'input'` PDOM-only Node - but
+  // PDOMSiblingStyle.js shows every PDOM sibling is force-hidden (`font-size: 1px`, `clip: rect(1px,1px,1px,1px)`,
+  // plus `opacity: 0.0001` on the PDOM root) by design, since the PDOM is meant to be an invisible shadow of the
+  // real SVG/Canvas visuals. Making that usable as a *visible, typeable* field would mean hand-building an
+  // entire custom text box (a synced visible Text node mirroring an invisible input's value on every
+  // keystroke, a hand-drawn caret/selection, IME passthrough) with no existing precedent anywhere in the
+  // installed sun/scenery-phet/scenery source - the only comparable pattern (sun's AccessibleValueHandler,
+  // used by sliders) pairs an invisible native input with a fully custom-drawn SVG control for numeric
+  // *dragging*, not free-text entry, and isn't reusable here. That rebuild was judged to exceed reasonable
+  // effort and to risk a worse, more fragile interaction than the one being fixed here.
+  //
+  // Fallback taken instead: an explicit positive `tabIndex`. This does NOT fix a screen reader's
+  // linear/structural reading order (this field is still, structurally, the last node under #sim, so a
+  // screen reader user linearly reading the page still hits it last) - it only affects the browser's
+  // Tab-key traversal order, since elements with a positive tabIndex are visited (in ascending order) before
+  // any element with the default tabIndex 0. Because every *other* focusable control in this sim keeps its
+  // default tabIndex (0), there is no tabIndex value that places this field precisely "between the slider and
+  // the String Properties panel" without also assigning explicit tabIndex values to every other control - out
+  // of scope for this fix and risky to retrofit sim-wide. tabIndex 1 is the least-disruptive available option:
+  // it makes this field deterministically the FIRST Tab stop on the whole page (rather than the buried LAST
+  // one, after Reset All and the PhET Menu), which was judged the bigger practical win for keyboard users even
+  // though it doesn't preserve exact visual adjacency to the frequency slider.
+  input.tabIndex = 1;
+
+  // Visually-hidden description element, referenced via aria-describedby - the standard way to give
+  // a native <input> an accessible help text distinct from its accessible name (the aria-label above).
+  const description = document.createElement("span");
+  description.id = "standing-waves-driving-frequency-help-text";
+  description.textContent = helpText;
+  description.style.position = "absolute";
+  description.style.width = "1px";
+  description.style.height = "1px";
+  description.style.overflow = "hidden";
+  description.style.clip = "rect(0, 0, 0, 0)";
+  description.style.whiteSpace = "nowrap";
+  input.setAttribute("aria-describedby", description.id);
+
+  const container = document.createElement("span");
+  container.style.display = "inline-block";
+  container.appendChild(input);
+  container.appendChild(description);
+
+  const formatValue = (value: number): string => value.toFixed(2);
+  input.value = formatValue(model.drivingFrequencyProperty.value);
+
+  // Keep the displayed text in sync with the model from any source EXCEPT this field's own typing.
+  model.drivingFrequencyProperty.link((value) => {
+    if (document.activeElement !== input) {
+      input.value = formatValue(value);
+    }
+  });
+
+  // Clamp on commit (blur/Enter) only - never mid-keystroke, so typing "12.5" is never fought.
+  const commit = (): void => {
+    const parsed = parseFloat(input.value);
+    const committed = Number.isFinite(parsed) ? DRIVING_FREQUENCY_RANGE.constrainValue(parsed) : model.drivingFrequencyProperty.value;
+    model.drivingFrequencyProperty.value = committed;
+    input.value = formatValue(committed);
+  };
+  input.addEventListener("blur", commit);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      commit();
+      input.blur();
+    }
+  });
+
+  return new DOM(container, { allowInput: true });
 }
 
 export type ControlPanelOptions = {
@@ -63,6 +178,25 @@ export class ControlPanel extends VBox {
       titleNodeOptions: { font: PROMINENT_LABEL_FONT },
       layoutFunction: NumberControl.createLayoutFunction4({ verticalSpacing: 4 }),
       accessibleName: "Driving Frequency",
+    });
+
+    // Manual Hz entry: the SAME quantity as the slider above (drivingFrequencyProperty), not a
+    // separate control - grouped into one row/section with frequencyControl rather than its own
+    // panel section, per the reviewed spec.
+    const frequencyEntryField = createFrequencyEntryField(model);
+    const frequencyRangeCaption = new Text(`${DRIVING_FREQUENCY_RANGE.min}–${DRIVING_FREQUENCY_RANGE.max} Hz`, {
+      font: CAPTION_FONT,
+      fill: "#707070",
+    });
+    const frequencyEntryRow = new HBox({
+      spacing: 6,
+      align: "center",
+      children: [new Text("Set exact:", { font: SECONDARY_LABEL_FONT }), frequencyEntryField, new Text("Hz", { font: SECONDARY_LABEL_FONT }), frequencyRangeCaption],
+    });
+    const frequencyRow = new VBox({
+      spacing: 2,
+      align: "left",
+      children: [frequencyControl, frequencyEntryRow],
     });
 
     const amplitudeControl = new NumberControl("Amplitude", model.drivingAmplitudeProperty, new Range(0, AMPLITUDE_CAP_FRACTION * LENGTH_RANGE.max), {
@@ -102,7 +236,7 @@ export class ControlPanel extends VBox {
     const prominentContent = new VBox({
       spacing: 10,
       align: "left",
-      children: [frequencyControl, amplitudeControl, boundaryRow, drivingRow, timeControlNode],
+      children: [frequencyRow, amplitudeControl, boundaryRow, drivingRow, timeControlNode],
     });
     const prominentPanel = new Panel(prominentContent, {
       fill: PROMINENT_PANEL_FILL,
@@ -112,6 +246,121 @@ export class ControlPanel extends VBox {
       yMargin: 10,
       minWidth: PANEL_WIDTH,
       align: "left",
+    });
+
+    // ---- "Predicted Harmonics" panel: classical resonance frequencies for the CURRENT string,
+    // clickable to jump the driving frequency there, plus an always-visible nearest-harmonic readout
+    // fed by the existing (unbounded) nearestHarmonicProperty/nearestHarmonicFrequencyProperty -
+    // never recomputed against the bounded predictedHarmonics() list below, per the physics review
+    // finding documented on predictedHarmonics() in the model. Prominent-tier styling, since this is
+    // a primary teaching tool for this sim, not a secondary/opt-in readout. ----
+
+    const predictedHarmonicsCaption = new RichText("Classical resonance frequencies for this string. Click one to set the driving frequency there.", {
+      font: CAPTION_FONT,
+      fill: "#707070",
+      lineWrap: PANEL_WIDTH - 20,
+    });
+
+    const noHarmonicsInRangeText = new RichText("No predicted harmonics fit in the current frequency range at these string settings.", {
+      font: CAPTION_FONT,
+      fill: "#707070",
+      lineWrap: PANEL_WIDTH - 20,
+    });
+
+    const harmonicRowsBox = new VBox({ spacing: 4, align: "left" });
+
+    const rebuildHarmonicRows = (): void => {
+      // Dispose the previous rebuild's row buttons (but not the shared, reused noHarmonicsInRangeText
+      // node) before replacing them - this can fire on every Tension/Density drag frame via the
+      // Multilink below, so leaving discarded TextPushButtons undisposed would be sloppy even though
+      // it isn't a Property-retention leak (each button's own listeners are on its own short-lived
+      // Properties, not on anything long-lived - see the qa-tester finding this addresses).
+      for (const oldChild of harmonicRowsBox.children) {
+        if (oldChild !== noHarmonicsInRangeText) {
+          oldChild.dispose();
+        }
+      }
+
+      const fundamental = model.fundamentalFrequencyProperty.value;
+      const boundary = model.farBoundaryTypeProperty.value;
+      const harmonics = predictedHarmonics(fundamental, boundary, DRIVING_FREQUENCY_RANGE.max, PREDICTED_HARMONICS_LIST_MAX_COUNT);
+
+      if (harmonics.length === 0) {
+        harmonicRowsBox.children = [noHarmonicsInRangeText];
+        return;
+      }
+
+      harmonicRowsBox.children = harmonics.map(
+        ({ n, frequency }) =>
+          new TextPushButton(`${ordinal(n)} harmonic: ${frequency.toFixed(2)} Hz`, {
+            font: SECONDARY_LABEL_FONT,
+            baseColor: "white",
+            xMargin: 6,
+            yMargin: 3,
+            accessibleName: `Set driving frequency to the ${ordinal(n)} harmonic, ${frequency.toFixed(2)} hertz`,
+            listener: () => {
+              // Defensive only - predictedHarmonics() already only returns in-range frequencies.
+              model.drivingFrequencyProperty.value = DRIVING_FREQUENCY_RANGE.constrainValue(frequency);
+            },
+          }),
+      );
+    };
+    // DerivedProperty dependencies, not user-settable state - a Multilink is the documented pattern
+    // for a side effect (rebuilding this Node's children) that doesn't need to be exposed as state.
+    Multilink.multilink([model.fundamentalFrequencyProperty, model.farBoundaryTypeProperty], rebuildHarmonicRows);
+
+    const goToNearestHarmonicButton = new TextPushButton("Go to Nearest Harmonic", {
+      font: SECONDARY_LABEL_FONT,
+      accessibleName: "Go to Nearest Harmonic",
+      listener: () => {
+        // NOT defensive-only here: nearestHarmonicFrequencyProperty is unbounded and CAN legitimately
+        // exceed DRIVING_FREQUENCY_RANGE (e.g. whenever predictedHarmonics() above returns an empty
+        // list), and drivingFrequencyProperty asserts its own range - this clamp is required.
+        model.drivingFrequencyProperty.value = DRIVING_FREQUENCY_RANGE.constrainValue(model.nearestHarmonicFrequencyProperty.value);
+      },
+    });
+
+    const NEAREST_HARMONIC_EPSILON = 1e-9;
+    const nearestHarmonicIndicatorStringProperty = new DerivedProperty(
+      [model.drivingFrequencyProperty, model.nearestHarmonicProperty, model.nearestHarmonicFrequencyProperty],
+      (drivingFrequency, n, nearestFrequency) => {
+        const offset = drivingFrequency - nearestFrequency;
+        if (Math.abs(offset) < NEAREST_HARMONIC_EPSILON) {
+          return `Nearest harmonic: ${ordinal(n)} (${nearestFrequency.toFixed(2)} Hz) — you're there`;
+        }
+        const direction = offset > 0 ? "above" : "below";
+        return `Nearest harmonic: ${ordinal(n)} (${nearestFrequency.toFixed(2)} Hz), ${Math.abs(offset).toFixed(2)} Hz ${direction}`;
+      },
+    );
+    // Neutral gray/bold, matching the styling used for the (now-removed) resonance note elsewhere in
+    // this file - explicitly NOT a "correct answer" color; this is a plain observation, not a reward.
+    // RichText (not Text) so long strings wrap within the panel instead of overflowing it - e.g. at a
+    // high harmonic number/offset combination ("Nearest harmonic: 23rd (39.83 Hz), 3.17 Hz above" is
+    // wider than PANEL_WIDTH at this font size), matching the lineWrap pattern already used by the
+    // other captions in this file (predictedHarmonicsCaption, noHarmonicsInRangeText, below).
+    const nearestHarmonicIndicatorText = new RichText(nearestHarmonicIndicatorStringProperty, {
+      font: NEAREST_HARMONIC_FONT,
+      fill: "#555555",
+      lineWrap: PANEL_WIDTH - 20,
+    });
+
+    const predictedHarmonicsContent = new VBox({
+      spacing: 8,
+      align: "left",
+      children: [predictedHarmonicsCaption, harmonicRowsBox, goToNearestHarmonicButton, nearestHarmonicIndicatorText],
+    });
+    const predictedHarmonicsPanel = new AccordionBox(predictedHarmonicsContent, {
+      titleNode: new Text("Predicted Harmonics", { font: SECONDARY_TITLE_FONT }),
+      expandedDefaultValue: true,
+      fill: PROMINENT_PANEL_FILL,
+      stroke: PROMINENT_PANEL_STROKE,
+      cornerRadius: 8,
+      contentXMargin: 10,
+      contentYMargin: 8,
+      buttonXMargin: 8,
+      buttonYMargin: 8,
+      minWidth: PANEL_WIDTH,
+      titleAlignX: "left",
     });
 
     // ---- Secondary tier: "String Properties" - visually smaller/quieter ----
@@ -198,31 +447,14 @@ export class ControlPanel extends VBox {
 
     const waveSpeedInfoStringProperty = new DerivedProperty([model.waveSpeedProperty], (speed) => `Wave speed: ${speed.toFixed(2)} m/s`);
     const wavelengthInfoStringProperty = new DerivedProperty([wavelengthProperty], (wavelength) => `Wavelength: ${wavelength.toFixed(2)} m`);
-    const harmonicInfoStringProperty = new DerivedProperty(
-      [model.nearestHarmonicProperty, model.nearestHarmonicFrequencyProperty],
-      (n, f) => `Nearest harmonic: ${ordinal(n)} (${f.toFixed(2)} Hz)`,
-    );
-
-    // Purely informational - explicitly no checkmarks/stars/success color-coding/sounds, per the
-    // pedagogy review: this should read as a neutral observation, not a reward state.
-    const RESONANCE_TOLERANCE = 0.03; // fractional closeness to the nearest harmonic frequency
-    const resonanceNoteStringProperty = new DerivedProperty(
-      [model.drivingFrequencyProperty, model.nearestHarmonicFrequencyProperty, model.nearestHarmonicProperty],
-      (drivingFrequency, harmonicFrequencyValue, n) =>
-        Math.abs(drivingFrequency - harmonicFrequencyValue) / harmonicFrequencyValue < RESONANCE_TOLERANCE ? `Near the ${ordinal(n)} harmonic` : "",
-    );
-    const hasResonanceNoteProperty = new DerivedProperty([resonanceNoteStringProperty], (s) => s.length > 0);
+    // Nearest-harmonic info and the old resonance note were removed from here - both are now
+    // superseded by the always-visible indicator in the new "Predicted Harmonics" panel below.
 
     const waveInfoDetails = new VBox({
       spacing: 3,
       align: "left",
       visibleProperty: options.showWaveInfoProperty,
-      children: [
-        new Text(waveSpeedInfoStringProperty, { font: CAPTION_FONT }),
-        new Text(wavelengthInfoStringProperty, { font: CAPTION_FONT }),
-        new Text(harmonicInfoStringProperty, { font: CAPTION_FONT }),
-        new Text(resonanceNoteStringProperty, { font: CAPTION_FONT, fill: "#555555", visibleProperty: hasResonanceNoteProperty }),
-      ],
+      children: [new Text(waveSpeedInfoStringProperty, { font: CAPTION_FONT }), new Text(wavelengthInfoStringProperty, { font: CAPTION_FONT })],
     });
 
     const overlaysContent = new VBox({
@@ -248,7 +480,7 @@ export class ControlPanel extends VBox {
     super({
       spacing: 12,
       align: "left",
-      children: [prominentPanel, stringPropertiesBox, overlaysPanel] as Node[],
+      children: [prominentPanel, predictedHarmonicsPanel, stringPropertiesBox, overlaysPanel] as Node[],
     });
   }
 }

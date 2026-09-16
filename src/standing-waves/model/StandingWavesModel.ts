@@ -141,6 +141,29 @@ export function nearestHarmonic(drivingFrequency: number, fundamental: number, b
 }
 
 /**
+ * Up to maxCount predicted harmonic frequencies (n=1,2,3,...) that fall within [0, maxFrequency].
+ * Returns [] if even n=1 exceeds maxFrequency (a real case at this sim's parameter extremes - a
+ * short, taut, light string can push the fundamental above the driving-frequency range).
+ *
+ * Deliberately separate from nearestHarmonic()/nearestHarmonicFrequencyProperty (never reimplemented
+ * against this bounded list) - per physics review, "nearest" must stay computed against the true,
+ * unbounded harmonic series, since the actual nearest harmonic to a given driving frequency can be an
+ * arbitrarily high n that this maxCount-truncated list does not include. This function exists only to
+ * populate a bounded picker list in the view.
+ */
+export function predictedHarmonics(fundamental: number, boundary: FarBoundaryType, maxFrequency: number, maxCount: number): Array<{ n: number; frequency: number }> {
+  const results: Array<{ n: number; frequency: number }> = [];
+  for (let n = 1; results.length < maxCount; n++) {
+    const frequency = harmonicFrequency(n, fundamental, boundary);
+    if (frequency > maxFrequency) {
+      break;
+    }
+    results.push({ n, frequency });
+  }
+  return results;
+}
+
+/**
  * Predicted node positions (m, measured from x=0) for the n-th harmonic standing-wave PATTERN of a
  * string of length L - purely geometric, used only for the optional "predicted nodes" overlay.
  * fixed-fixed: n+1 nodes at x = m*L/n, m=0..n (both ends are nodes).
