@@ -15,6 +15,25 @@ const DIAGRAM_ORIGIN_Y = 260;
 const RULER_WIDTH = 320; // px, represents 1 m at StringNode's PIXELS_PER_METER_X (kept in sync by eye - both are view-layout constants)
 const RULER_MAJOR_TICK_SPACING = 32; // px, represents 10 cm
 
+// ---- controlPanel vertical layout budget ----
+//
+// ScreenView.layoutBounds is a FIXED logical rectangle (Bounds2(0, 0, 1024, 618), see
+// DEFAULT_LAYOUT_BOUNDS in node_modules/scenerystack/src/joist/js/ScreenView.ts) that Joist scales
+// uniformly to fit the real browser window - content placed below layoutBounds.maxY is not reliably
+// visible, since it gets clipped depending on window aspect ratio. Separately, Sim.ts reserves a
+// NavigationBar (nominal height 40, see node_modules/scenerystack/src/joist/js/NavigationBar.ts) at
+// the bottom of the real window and fits the ScreenView above it - so the two constraints that
+// actually bound controlPanel's usable height are both expressed in layoutBounds' own logical pixels:
+// layoutBounds itself (the navigation bar lives entirely below it) and resetAllButton (below).
+const CONTROL_PANEL_TOP = 56; // controlPanel.top offset from layoutBounds.minY
+
+// resetAllButton sits at (right: layoutBounds.maxX - 10, bottom: layoutBounds.maxY - 10). Its default
+// radius is SceneryPhetConstants.DEFAULT_BUTTON_RADIUS = 20.8 (node_modules/scenerystack/src/
+// scenery-phet/js/SceneryPhetConstants.ts), i.e. a ~41.6px diameter; round up for safety.
+const RESET_ALL_BUTTON_MARGIN = 10; // matches resetAllButton's own bottom margin, set below
+const RESET_ALL_BUTTON_DIAMETER = 42; // ceil(2 * SceneryPhetConstants.DEFAULT_BUTTON_RADIUS)
+const BOTTOM_CLEARANCE_BUFFER = 12; // extra breathing room between controlPanel and resetAllButton
+
 export class StandingWavesScreenView extends ScreenView {
   private readonly stringNode: StringNode;
   private readonly showPredictedNodesProperty: BooleanProperty;
@@ -22,6 +41,7 @@ export class StandingWavesScreenView extends ScreenView {
   private readonly showWaveInfoProperty: BooleanProperty;
   private readonly timeSpeedProperty: EnumerationProperty<TimeSpeed>;
   private readonly rulerPositionProperty: Vector2Property;
+  private readonly controlPanel: ControlPanel;
 
   public constructor(model: StandingWavesModel, options?: ScreenViewOptions) {
     super(options);
@@ -44,14 +64,21 @@ export class StandingWavesScreenView extends ScreenView {
       y0: DIAGRAM_ORIGIN_Y,
     });
 
-    const controlPanel = new ControlPanel(model, {
+    // See the CONTROL_PANEL_TOP / RESET_ALL_BUTTON_* comment above for where these two terms come
+    // from. This is the total height ControlPanel may occupy from its own top down to a safe
+    // clearance above resetAllButton - it's on ControlPanel (not guessed pixel constants inside it)
+    // to decide how to spend that budget between its always-visible and scrollable sections.
+    const controlPanelAvailableHeight = this.layoutBounds.height - CONTROL_PANEL_TOP - (RESET_ALL_BUTTON_MARGIN + RESET_ALL_BUTTON_DIAMETER + BOTTOM_CLEARANCE_BUFFER);
+
+    this.controlPanel = new ControlPanel(model, {
       timeSpeedProperty: this.timeSpeedProperty,
       showPredictedNodesProperty: this.showPredictedNodesProperty,
       showRulerProperty: this.showRulerProperty,
       showWaveInfoProperty: this.showWaveInfoProperty,
+      availableHeight: controlPanelAvailableHeight,
     });
-    controlPanel.right = this.layoutBounds.maxX - 16;
-    controlPanel.top = this.layoutBounds.minY + 56;
+    this.controlPanel.right = this.layoutBounds.maxX - 16;
+    this.controlPanel.top = this.layoutBounds.minY + CONTROL_PANEL_TOP;
 
     const howThisWorksDialog = new HowThisWorksDialog(model);
     const infoButton = new InfoButton({
@@ -104,11 +131,11 @@ export class StandingWavesScreenView extends ScreenView {
         model.reset();
         this.reset();
       },
-      right: this.layoutBounds.maxX - 10,
-      bottom: this.layoutBounds.maxY - 10,
+      right: this.layoutBounds.maxX - RESET_ALL_BUTTON_MARGIN,
+      bottom: this.layoutBounds.maxY - RESET_ALL_BUTTON_MARGIN,
     });
 
-    this.children = [this.stringNode, controlPanel, infoButton, rulerNode, resetAllButton];
+    this.children = [this.stringNode, this.controlPanel, infoButton, rulerNode, resetAllButton];
   }
 
   /**
@@ -126,5 +153,6 @@ export class StandingWavesScreenView extends ScreenView {
     this.showWaveInfoProperty.reset();
     this.timeSpeedProperty.reset();
     this.rulerPositionProperty.reset();
+    this.controlPanel.resetScroll();
   }
 }

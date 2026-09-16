@@ -13,6 +13,7 @@ import {
   predictedHarmonics,
   type StandingWavesModel,
 } from "../model/StandingWavesModel.js";
+import { ScrollableVBox } from "./ScrollableVBox.js";
 
 // This file is VIEW code (imports scenery/sun/scenery-phet freely) - all physics lives in the model.
 
@@ -28,6 +29,11 @@ const SECONDARY_PANEL_FILL = "#f5f5f5";
 const SECONDARY_PANEL_STROKE = "#cccccc";
 
 const PANEL_WIDTH = 236;
+
+// Vertical gap between the four stacked sections (prominentPanel, predictedHarmonicsPanel,
+// stringPropertiesBox, overlaysPanel) - also used to size the scrollable region's viewport, so the
+// two stay consistent (see availableHeight handling in the constructor below).
+const CONTROL_PANEL_SPACING = 12;
 
 // Maximum number of rows shown in the "Predicted Harmonics" picker list - a purely cosmetic UI bound
 // (see predictedHarmonics() in the model, which is deliberately unrelated to nearestHarmonic()).
@@ -161,16 +167,34 @@ export type ControlPanelOptions = {
   showPredictedNodesProperty: BooleanProperty;
   showRulerProperty: BooleanProperty;
   showWaveInfoProperty: BooleanProperty;
+  // Total vertical space, in view pixels, that ControlPanel may occupy from its own top (see
+  // controlPanel.top in StandingWavesScreenView.ts) down to a safe clearance above the reset button
+  // - i.e. the ScreenView's measured, documented "you may use this much height" budget. ControlPanel
+  // uses this to size the scrollable region below prominentPanel; it does NOT hardcode a guessed
+  // pixel height, since prominentPanel's real height (subtracted below) can change with content.
+  availableHeight: number;
 };
 
 /**
  * All simulation controls, organized into three tiers per the reviewed interaction design:
  *  1. Prominent: driving frequency/amplitude, far-boundary choice, driving on/off, play/pause+speed.
+ *     Always fully visible, unscrolled, pinned at the top of the panel.
  *  2. Secondary ("String Properties"): length/tension/density/damping - visually smaller/quieter,
  *     since students explore these less often than the prominent-tier controls.
  *  3. Opt-in overlays: predicted-nodes overlay, ruler, and a wave-info readout - all default OFF.
+ *
+ * Tiers 2 and 3, plus the "Predicted Harmonics" panel, are wrapped in a ScrollableVBox rather than
+ * stacked directly, because their combined height can exceed the space available above the
+ * navigation bar (see availableHeight above, and the layout-bounds/navigation-bar explanation above
+ * CONTROL_PANEL_TOP in StandingWavesScreenView.ts) - without scrolling, controls at the bottom of
+ * that stack (e.g. Damping, the wave-speed readout) could become unreachable by mouse/touch.
  */
 export class ControlPanel extends VBox {
+  // Scrolls the secondary/opt-in section back to the top - called from StandingWavesScreenView's
+  // reset(), alongside its other view-only UI Properties (showPredictedNodesProperty etc.), so
+  // "Reset All" also undoes any scrolling the student did, not just the model/toggle state.
+  public readonly resetScroll: () => void;
+
   public constructor(model: StandingWavesModel, options: ControlPanelOptions) {
     const frequencyControl = new NumberControl("Frequency", model.drivingFrequencyProperty, DRIVING_FREQUENCY_RANGE, {
       delta: 0.1,
@@ -477,10 +501,24 @@ export class ControlPanel extends VBox {
       align: "left",
     });
 
-    super({
-      spacing: 12,
-      align: "left",
-      children: [prominentPanel, predictedHarmonicsPanel, stringPropertiesBox, overlaysPanel] as Node[],
+    // The scrollable region gets whatever height remains after prominentPanel (measured from its
+    // real, just-built bounds - not a guessed constant) and the gap above it. Clamped at 0 so a
+    // pathologically small availableHeight (e.g. a future much taller prominentPanel) degrades to
+    // "no visible scroll room" rather than a negative viewportHeight.
+    const scrollViewportHeight = Math.max(0, options.availableHeight - prominentPanel.height - CONTROL_PANEL_SPACING);
+
+    const scrollableSection = new ScrollableVBox({
+      children: [predictedHarmonicsPanel, stringPropertiesBox, overlaysPanel],
+      spacing: CONTROL_PANEL_SPACING,
+      viewportHeight: scrollViewportHeight,
     });
+
+    super({
+      spacing: CONTROL_PANEL_SPACING,
+      align: "left",
+      children: [prominentPanel, scrollableSection] as Node[],
+    });
+
+    this.resetScroll = () => scrollableSection.resetScroll();
   }
 }
