@@ -21,8 +21,12 @@ export default defineConfig({
   },
 
   test: {
-    // No DOM/SceneryStack rendering is tested yet - only plain TypeScript functions.
+    // No DOM/SceneryStack rendering is tested yet - model-level physics/Property tests only.
     environment: "node",
     include: ["src/**/*.test.ts"],
+    // Polyfills the `self` global that scenerystack's dev build expects at import time (Node has
+    // no `self` global). See src/vitest-setup.ts for why this is needed and why it's not a full
+    // DOM shim.
+    setupFiles: ["src/vitest-setup.ts"],
   },
 });

@@ -11,6 +11,9 @@ dist-ssr
 *.local
 tsconfig.tsbuildinfo
 
+# Claude Code session-internal artifacts
+.claude/scheduled_tasks.lock
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
