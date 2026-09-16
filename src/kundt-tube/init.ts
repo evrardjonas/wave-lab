@@ -4,7 +4,7 @@ import { init, madeWithSceneryStackSplashDataURI } from "scenerystack/init";
 // This needs to happen first, so we have init.ts => assert.ts => splash.ts => brand.ts => everything else (in main.ts)
 init({
   // Internal name of the simulation.
-  name: "wave-lab",
+  name: "kundt-tube",
 
   // Version (will be shown in the About dialog)
   version: "1.0.0",

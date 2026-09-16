@@ -5,13 +5,19 @@
   "type": "module",
   "scripts": {
     "start": "npx vite",
-    "build": "npx tsc && npx vite build"
+    "start:sound-waves": "npx vite --open /sound-waves.html",
+    "start:standing-waves": "npx vite --open /standing-waves.html",
+    "start:kundt-tube": "npx vite --open /kundt-tube.html",
+    "build": "npx tsc && npx vite build",
+    "test": "npx vitest run",
+    "test:watch": "npx vitest"
   },
   "dependencies": {
     "scenerystack": "^3.0.0"
   },
   "devDependencies": {
     "vite": "^5.4.10",
+    "vitest": "^3.2.7",
     "eslint": "^9.17.0",
     "@eslint/js": "^9.17.0",
     "typescript-eslint": "^8.18.2",
