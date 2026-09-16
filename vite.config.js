@@ -3,16 +3,23 @@
 import { defineConfig } from "vitest/config";
 
 // https://vitejs.dev/config/
-export default defineConfig({
-  // So the build can be served from an arbitrary path
-  base: "./",
+export default defineConfig(({ command }) => ({
+  // Published as a GitHub Pages PROJECT site at https://evrardjonas.github.io/wave-lab/, so the
+  // production build's base must be "/wave-lab/" for its asset/module URLs to resolve correctly
+  // once served from that subpath. Only the production build (`vite build`) uses this - the dev
+  // server (`vite`/`npm start`) keeps the relative "./" base it always had, so local development is
+  // unaffected and still runs at the site root (http://localhost:5173/, etc.).
+  base: command === "build" ? "/wave-lab/" : "./",
 
   build: {
     rollupOptions: {
-      // Three independent, separately buildable/embeddable entry points - one per simulation.
-      // See .claude/skills/scenerystack/references/multi-sim-architecture.md for why this is
-      // three Sims rather than one Sim with three Screens.
+      // Three independent, separately buildable/embeddable entry points - one per simulation -
+      // plus the root landing page, which must be built too so GitHub Pages' site root
+      // (https://evrardjonas.github.io/wave-lab/) actually resolves to something instead of 404ing.
+      // See .claude/skills/scenerystack/references/multi-sim-architecture.md for why this is three
+      // Sims rather than one Sim with three Screens.
       input: {
+        index: "index.html",
         soundWaves: "sound-waves.html",
         standingWaves: "standing-waves.html",
         kundtTube: "kundt-tube.html",
@@ -29,4 +36,4 @@ export default defineConfig({
     // DOM shim.
     setupFiles: ["src/vitest-setup.ts"],
   },
-});
+}));
