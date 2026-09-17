@@ -1,9 +1,12 @@
-import type { BooleanProperty, EnumerationProperty } from "scenerystack/axon";
+import type { BooleanProperty, TReadOnlyProperty } from "scenerystack/axon";
+import { DerivedProperty } from "scenerystack/axon";
 import { Range } from "scenerystack/dot";
 import { Line, RichText, Text, VBox } from "scenerystack/scenery";
 import { Checkbox, Panel } from "scenerystack/sun";
-import { NumberControl, NumberDisplay, PhetFont, TimeControlNode, TimeSpeed } from "scenerystack/scenery-phet";
+import { NumberControl, NumberDisplay, PhetFont, TimeControlNode } from "scenerystack/scenery-phet";
 import { AMPLITUDE_SAFETY_FRACTION, DOMAIN_LENGTH, FREQUENCY_RANGE, SoundWavesModel, strictAmplitudeBound, wavelength } from "../model/SoundWavesModel.js";
+import type { RepresentationMode } from "./ParticleFieldNode.js";
+import { PlaybackSpeedControl } from "./PlaybackSpeedControl.js";
 
 // This file is VIEW code (imports scenery/sun/scenery-phet freely) - all physics lives in the model.
 
@@ -40,17 +43,19 @@ function widestPossibleAmplitudeRange(speedOfSound: number): Range {
 }
 
 export type ControlPanelOptions = {
-  timeSpeedProperty: EnumerationProperty<TimeSpeed>;
   showPressureGraphProperty: BooleanProperty;
   showRulerProperty: BooleanProperty;
   showPressureFieldProperty: BooleanProperty;
   showCompressionTrackerProperty: BooleanProperty;
+  representationModeProperty: TReadOnlyProperty<RepresentationMode>;
 };
 
 /**
  * All simulation controls, organized per the reviewed interaction design:
  *  - Prominent tier: Frequency/Amplitude NumberControls (with an amplitude-exaggeration disclosure
- *    caption) and TimeControlNode (play/pause + Normal/Slow speed).
+ *    caption), TimeControlNode (play/pause/step only - see PlaybackSpeedControl below), and this sim's
+ *    own PlaybackSpeedControl (Normal/Slow/Ultra Slow - V3 addition, replaces TimeControlNode's built-in,
+ *    closed-enum speed radio group).
  *  - An ALWAYS-VISIBLE passive readout strip (Frequency, Wavelength, Speed of Sound) - unlike
  *    Standing Waves' opt-in wave-info panel, these are this sim's centerpiece per the pedagogy
  *    review, so they are never hidden behind a checkbox.
@@ -84,15 +89,36 @@ export class ControlPanel extends Panel {
       lineWrap: PANEL_WIDTH - 20,
     });
 
+    // V3: this sim's own 3-way PlaybackSpeedControl (Normal/Slow/Ultra Slow) replaces TimeControlNode's
+    // built-in speed radio group entirely - scenery-phet's TimeSpeed enum is closed (FAST/NORMAL/SLOW
+    // only, see node_modules/scenerystack/src/scenery-phet/js/TimeSpeed.ts), with no Ultra Slow member to
+    // repurpose. `timeSpeedProperty: null` cleanly disables just the built-in speed radio group while
+    // keeping play/pause/step (see the installed TimeControlNode source: the play/pause/step button group
+    // is always constructed regardless of timeSpeedProperty, which only gates the separate, optional
+    // TimeSpeedRadioButtonGroup).
     const timeControlNode = new TimeControlNode(model.isPlayingProperty, {
-      timeSpeedProperty: options.timeSpeedProperty,
-      timeSpeeds: [TimeSpeed.NORMAL, TimeSpeed.SLOW],
+      timeSpeedProperty: null,
+      // StepForwardButton ships with no default listener (the consuming sim must supply one) - without
+      // this, the button renders correctly enabled/disabled but silently does nothing when clicked.
+      // stepOnce() bypasses model.step()'s isPlayingProperty gate deliberately (see its own doc comment).
+      playPauseStepButtonOptions: {
+        stepForwardButtonOptions: {
+          listener: () => model.stepOnce(),
+        },
+      },
     });
+    const playbackSpeedControl = new PlaybackSpeedControl(model.playbackSpeedProperty);
 
     const prominentContent = new VBox({
       spacing: 10,
       align: "left",
-      children: [frequencyControl, new VBox({ spacing: 2, align: "left", children: [amplitudeControl, amplitudeCaption] }), timeControlNode],
+      children: [
+        frequencyControl,
+        new VBox({ spacing: 2, align: "left", children: [amplitudeControl, amplitudeCaption] }),
+        // Kept visually grouped together (play/pause/step/reset + speed), per the reviewed interaction
+        // design - not split across unrelated sections of the panel.
+        new VBox({ spacing: 8, align: "left", children: [timeControlNode, playbackSpeedControl] }),
+      ],
     });
 
     // ---- Always-visible readout strip (this sim's centerpiece - never opt-in) ----
@@ -142,15 +168,32 @@ export class ControlPanel extends Panel {
       lineWrap: PANEL_WIDTH - 20,
     });
 
+    // V3: this checkbox's opt-in "prominent" shading tier becomes a no-op once Pedagogical (labeled
+    // "Simplified" on RepresentationModeControl - see that file's V3 label-wording fix) mode is already
+    // maximally bold (see PressureFieldNode.ts's Pedagogical-tier redraw) - DISABLED (not hidden, which
+    // would shift layout) while representationModeProperty is 'pedagogical', with caption/help text
+    // updated so it reads as intentional rather than broken. Re-enabled normally in Real mode. User-facing
+    // strings below say "Simplified mode" (matching the button's visible label), not "Pedagogical mode".
+    const pressureFieldEnabledProperty = new DerivedProperty([options.representationModeProperty], (mode) => mode !== "pedagogical");
     const pressureFieldCheckbox = new Checkbox(options.showPressureFieldProperty, new Text("Show pressure field", { font: SECONDARY_LABEL_FONT }), {
+      enabledProperty: pressureFieldEnabledProperty,
       accessibleName: "Show pressure field",
-      accessibleHelpText: "Shades the particle field itself red where compressed and blue where rarefied, in addition to the always-on faint background shading.",
+      accessibleHelpText: new DerivedProperty([options.representationModeProperty], (mode) =>
+        mode === "pedagogical"
+          ? "Shades the particle field itself red where compressed and blue where rarefied. Already shown in Simplified mode."
+          : "Shades the particle field itself red where compressed and blue where rarefied, in addition to the always-on faint background shading.",
+      ),
     });
-    const pressureFieldCaption = new RichText("Shades the field itself by compression (red) and rarefaction (blue).", {
-      font: CAPTION_FONT,
-      fill: "#707070",
-      lineWrap: PANEL_WIDTH - 20,
-    });
+    const pressureFieldCaption = new RichText(
+      new DerivedProperty([options.representationModeProperty], (mode) =>
+        mode === "pedagogical" ? "Shades the field itself by compression (red) and rarefaction (blue). (Already shown in Simplified mode.)" : "Shades the field itself by compression (red) and rarefaction (blue).",
+      ),
+      {
+        font: CAPTION_FONT,
+        fill: "#707070",
+        lineWrap: PANEL_WIDTH - 20,
+      },
+    );
 
     const compressionTrackerCheckbox = new Checkbox(options.showCompressionTrackerProperty, new Text("Show compression tracker", { font: SECONDARY_LABEL_FONT }), {
       accessibleName: "Show compression tracker",

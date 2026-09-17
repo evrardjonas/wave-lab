@@ -1,8 +1,9 @@
 import { Multilink } from "scenerystack/axon";
 import type { TReadOnlyProperty } from "scenerystack/axon";
 import { clamp } from "scenerystack/dot";
-import { Circle, Line, Node } from "scenerystack/scenery";
-import { AMPLITUDE_SAFETY_FRACTION, DOMAIN_LENGTH, FREQUENCY_RANGE, SPHERICAL_SOURCE_RADIUS, SoundWavesModel, strictAmplitudeBound, wavelength } from "../model/SoundWavesModel.js";
+import { Circle, Line, Node, Path } from "scenerystack/scenery";
+import { Shape } from "scenerystack/kite";
+import { AMPLITUDE_SAFETY_FRACTION, DOMAIN_LENGTH, FREQUENCY_RANGE, PROBE_POSITION_METERS, SPHERICAL_SOURCE_RADIUS, SoundWavesModel, strictAmplitudeBound, wavelength } from "../model/SoundWavesModel.js";
 
 // This file is VIEW code (imports scenery freely) - all physics lives in the model; this file only
 // reads model.sampleAt(x)/model.sampleAtRadius(r) and repositions Nodes.
@@ -10,6 +11,20 @@ import { AMPLITUDE_SAFETY_FRACTION, DOMAIN_LENGTH, FREQUENCY_RANGE, SPHERICAL_SO
 // ---- Zoom (view-only state - see SoundWavesScreenView.ts, NOT a model Property) ----
 
 export type ViewZoom = "local" | "field";
+
+// ---- Representation mode (view-only state - see SoundWavesScreenView.ts, NOT a model Property; V3
+// addition) ----
+
+/**
+ * 'real': the sim's original, precise/quantitative rendering (unchanged behavior everywhere).
+ * 'pedagogical': a bolder, more legible rendering tuned for "is the wave visually obvious" over "is the
+ * shading quantitatively precise" - see PressureFieldNode.ts's redraw() for where this actually changes
+ * anything. Deliberately NOT joined to any geometry-rebuild Multilink anywhere it is consumed - every
+ * consumer reads it only inside its existing per-frame redraw() method, never rebuild(), so switching
+ * modes is guaranteed jump-free (no re-layout, no discontinuity - physical state/play state is fully
+ * preserved automatically since nothing model-side changes when this Property changes).
+ */
+export type RepresentationMode = "real" | "pedagogical";
 
 // Fixed on-screen pixel footprint for the visible field, regardless of zoom level - this is what makes
 // "zooming" feel like showing more of the domain in the same screen space, rather than resizing the
@@ -48,10 +63,19 @@ export function pixelsPerMeterForZoom(zoom: ViewZoom): number {
 // CompressionTrackerNode.ts, and PointSourceNode in LoudspeakerNode.ts) reads this SAME function - never
 // pixelsPerMeterForZoom above - in spherical mode, so the point-source icon, the particle rings, the
 // pressure shading rings, and the compression-tracker rings can never drift out of scale with each other.
-export const SPHERICAL_FIELD_PIXEL_WIDTH = 480; // px diameter -> 240px radius, constant across zoom
-// levels (see the cancellation above). Verified against SoundWavesScreenView.ts's SPHERICAL_ORIGIN_Y=360:
-// top edge 360-240=120, bottom edge 360+240=600 - see that file's layout comment for the full check
-// against the stage bounds, the chrome, and the ControlPanel.
+export const SPHERICAL_FIELD_PIXEL_WIDTH = 420; // px diameter -> 210px radius, constant across zoom
+// levels (see the cancellation above). V3 RE-CHECK: shrunk from 480 (240px radius) because the top chrome
+// grew from one row to two (see SoundWavesScreenView.ts's RepresentationModeControl addition) - the old
+// 240px radius no longer left enough clearance under the taller chrome. Verified against
+// SoundWavesScreenView.ts's SPHERICAL_ORIGIN_Y=385: top edge 385-210=175, bottom edge 385+210=595 - see
+// that file's layout comment for the full corrected arithmetic against the stage bounds, the two-row
+// chrome, and the ControlPanel. MUST-FIX RE-VERIFICATION (QA + pedagogy re-review): a zoomControl.top layout
+// bug in that file (now fixed) meant the ACTUAL rendered top-chrome bottom was 16px lower than this margin
+// was computed against, shrinking the real top-edge margin here to ~21px instead of the intended ~37px -
+// still technically over the 20px minimum, but by far less than intended. With that bug fixed, this
+// constant's 210px radius / 385 origin now genuinely delivers the intended ~37px margin (see
+// SoundWavesScreenView.ts's layout comment) - kept as-is (not pushed toward the feasible ceiling of 225px)
+// since 210px already leaves comfortable margin on every edge without any further changes being warranted.
 
 export function sphericalPixelsPerMeterForZoom(zoom: ViewZoom): number {
   return SPHERICAL_FIELD_PIXEL_WIDTH / VIEW_WIDTH_METERS[zoom];
@@ -154,6 +178,78 @@ const TRACER_TETHER_STROKE = "rgba(138, 48, 19, 0.55)";
 const TICK_HEIGHT = 10; // px (plane mode: half-height of each vertical equilibrium tick)
 const TICK_STROKE = "#c7c7c7";
 
+// ---- Fixed pressure probe marker (pairs with PressureGraphNode.ts's "boat" - see PROBE_POSITION_METERS's
+// own doc comment in SoundWavesModel.ts). A stationary spatial locator, PLANE MODE ONLY (see rebuild()/
+// rebuildPlane() - the probe layer is only ever populated on the plane branch, left empty in spherical mode,
+// matching the paired graph's own plane-only visibility - no separate visibleProperty is needed here). ----
+
+// Deliberately a DIFFERENT color family (dark teal) and a DIFFERENT shape (diamond) from both the tracer
+// (a FILLED ORANGE circle, TRACER_FILL, with its own ghost ring/tether) and the compression tracker (an
+// OUTLINE-ONLY, dashed red triangle/ring, see CompressionTrackerNode.ts's MARKER_STROKE) - so a student can
+// never mistake "the fixed measurement point" for either of those two, already visually-distinct, existing
+// markers.
+const PROBE_FILL = "#1f6f6f";
+const PROBE_STROKE = "#0d3a3a";
+const PROBE_MARKER_HALF_WIDTH = 6; // px, diamond half-width
+const PROBE_MARKER_HALF_HEIGHT = 8; // px, diamond half-height
+
+// Faint, dashed, and a different hue than TICK_STROKE's neutral gray - so this one guide line (there is only
+// ever one, at the single fixed probe x) can't be confused with the many per-column equilibrium ticks, while
+// still reading as "the same family of reference line". Spans the same vertical extent CompressionTrackerNode
+// already treats as the particle rows' own footprint (see that file's TRIANGLE_Y_OFFSET comment:
+// "+/-(ROW_COUNT*ROW_SPACING)/2 = +/-60px" - a deliberately generous rounding of the rows' true +/-50px
+// span, covering the rows' own Y_JITTER_MAX margin too).
+const PROBE_GUIDE_STROKE = "rgba(31, 111, 111, 0.35)";
+const PROBE_GUIDE_LINE_DASH = [3, 3];
+const PROBE_GUIDE_HALF_HEIGHT = (ROW_COUNT * ROW_SPACING) / 2;
+
+// ---- Pedagogical contrast boost (V3 addition) - styling ONLY, applied via redraw() below (never
+// rebuild()), so a representationMode switch never re-lays-out the field; see applyRepresentationStyling()
+// for where these are used. No geometry, count, or position changes anywhere in this file for this mode -
+// only stroke colors/widths on the SAME Nodes rebuild() already created. ----
+
+// Ordinary (non-tracer) particles have NO stroke at all in Real mode (see rebuildPlane/rebuildSpherical
+// below: `new Circle(PARTICLE_RADIUS, { fill: PARTICLE_FILL })`). PressureFieldNode's Pedagogical tier is
+// deliberately much bolder than Real mode's background shading, so a thin, dark, high-contrast outline
+// keeps ordinary particles legible against it.
+//
+// MUST-FIX (pedagogy re-review): a thin stroke alone was not enough - PARTICLE_FILL ("#5b6b7a", a blue-gray)
+// is close in BOTH hue and lightness to PressureFieldNode's boldest ("tier 4", alpha 0.88) rarefaction
+// color ("50, 100, 180", a blue), so a particle sitting over a bold rarefaction band nearly disappears into
+// it. The compression (warm red) side never had this problem, since red is hue-distant from a blue-gray
+// fill - but hue distance alone doesn't help on the rarefaction side, where hue is ALSO similar. Verified
+// numerically via approximate WCAG relative luminance contrast (L = 0.2126R+0.7152G+0.0722B in linearized
+// sRGB, contrast ratio = (Llighter+0.05)/(Ldarker+0.05)), composited over a white page background:
+//   - OLD PARTICLE_FILL "#5b6b7a" (L~=0.142) vs. composited rarefaction tier 4 (L~=0.183 after blending
+//     "50,100,180" @ alpha 0.88 over white): contrast ratio ~= 1.21:1 - essentially NO contrast (WCAG's
+//     >=3:1 graphical-distinction guideline is nowhere close), confirming the reported washout.
+//   - OLD PARTICLE_FILL vs. composited compression tier 4 (L~=0.194 after blending "196,60,40" @ 0.88 over
+//     white): contrast ratio ~= 1.27:1 - similarly low by LUMINANCE alone; the compression side only reads
+//     fine in practice because of hue distance, which this metric doesn't capture, not because its
+//     luminance contrast was actually any better.
+// FIX: in Pedagogical mode ONLY (Real mode keeps PARTICLE_FILL unchanged, via applyRepresentationStyling()
+// below - its own background shading never gets this bold, see PressureFieldNode's SUBTLE/PROMINENT ceilings
+// vs. the Pedagogical tier's 0.88), ordinary particles get a pale, near-white, slightly warm-toned fill
+// instead - equidistant from both the warm compression and cool rarefaction hues, so it can't collide with
+// either side the way a saturated color would, and a lightness-based contrast fix that (unlike hue distance)
+// actually helps against BOTH:
+//   - PEDAGOGICAL_PARTICLE_FILL "#f7f1e6" (L~=0.884): vs. rarefaction tier 4 (L~=0.183), contrast ratio ~=
+//     (0.884+0.05)/(0.183+0.05) ~= 4.0:1. vs. compression tier 4 (L~=0.194), contrast ratio ~=
+//     (0.884+0.05)/(0.194+0.05) ~= 3.8:1. Both comfortably clear the >=3:1 guideline, on BOTH sides.
+// The dark stroke is kept (and thickened slightly, see PEDAGOGICAL_PARTICLE_STROKE_WIDTH) for shape
+// definition against the pale fill, not as the primary contrast mechanism any more.
+const PEDAGOGICAL_PARTICLE_FILL = "#f7f1e6";
+const PEDAGOGICAL_PARTICLE_STROKE = "#22303d";
+const PEDAGOGICAL_PARTICLE_STROKE_WIDTH = 1; // bumped from 0.75 - see PEDAGOGICAL_PARTICLE_FILL's comment above; contrast now comes mainly from the fill swap, this just keeps the small (2.2px-radius) circle's edge crisp against a pale fill
+
+// Darker/higher-contrast than TICK_STROKE's light gray, for the same "stay legible against a bolder
+// background" reason.
+const PEDAGOGICAL_TICK_STROKE = "#6b6b6b";
+
+// Boosted-opacity variants of TRACER_RING_STROKE/TRACER_TETHER_STROKE above (same hue, higher alpha).
+const PEDAGOGICAL_TRACER_RING_STROKE = "rgba(138, 48, 19, 0.7)";
+const PEDAGOGICAL_TRACER_TETHER_STROKE = "rgba(138, 48, 19, 0.85)";
+
 // Below this on-screen spacing (px) between adjacent equilibrium reference lines (plane mode's vertical
 // ticks, spherical mode's concentric rings), they start to visually blur into a solid line/moire pattern
 // rather than reading as individual reference marks - a practical legibility floor, not a derived value.
@@ -182,6 +278,7 @@ export type ParticleFieldNodeOptions = {
   sphericalOriginX: number; // view x (px) of the spherical-mode point source
   sphericalOriginY: number; // view y (px) of the spherical-mode point source
   viewZoomProperty: TReadOnlyProperty<ViewZoom>;
+  representationModeProperty: TReadOnlyProperty<RepresentationMode>;
 };
 
 type PlaneParticleSpec = { equilibriumXMeters: number; yView: number; isTracer: boolean };
@@ -213,10 +310,29 @@ type SphericalParticleSpec = { equilibriumRadiusMeters: number; angleRadians: nu
  * mode specifically, the radial unit vector r-hat = (equilibrium x, equilibrium y)/equilibriumRadius is
  * fixed at rebuild time and never recomputed from anything time-varying, which is what guarantees pure
  * radial oscillation with no possibility of apparent tangential drift.
+ *
+ * V3 addition - Pedagogical contrast boost: representationModeProperty (see RepresentationMode's own doc
+ * comment above) is read ONLY inside redraw() (via applyRepresentationStyling()), never inside rebuild()/
+ * the geometry Multilink, so a mode switch is guaranteed jump-free - styling only, no geometry/count/
+ * position changes.
+ *
+ * V4 addition - fixed pressure probe: a single stationary marker + thin vertical guide line at the fixed
+ * physical position PROBE_POSITION_METERS (see that constant's own doc comment in SoundWavesModel.ts),
+ * built ONLY in rebuildPlane() (see buildProbe()) - plane mode only, pairing with PressureGraphNode.ts's own
+ * plane-only "boat" marker at the SAME physical x, so a student can trace one straight vertical line from
+ * this marker, through both files' guide lines, down to the boat. Unlike the tracer particle (which visibly
+ * oscillates every frame, held in place only in the "always returns" sense above) or the compression
+ * tracker's moving markers, THIS marker's screen position is fully static between rebuilds: its PIXEL x
+ * moves only when a zoom-driven rebuild recomputes pixelsPerMeter (its PHYSICAL x never changes), and its y
+ * is fixed at the row's own vertical center (planeOriginY) forever - it is never touched again in redraw(),
+ * unlike every particle in particlesLayer. All of the probe's vertical-motion cue instead lives in
+ * PressureGraphNode.ts's boat, which is the ONLY Node anywhere in this sim whose y tracks pressure at this
+ * one fixed point.
  */
 export class ParticleFieldNode extends Node {
   private readonly model: SoundWavesModel;
   private readonly viewZoomProperty: TReadOnlyProperty<ViewZoom>;
+  private readonly representationModeProperty: TReadOnlyProperty<RepresentationMode>;
   private readonly planeOriginX: number;
   private readonly planeOriginY: number;
   private readonly sphericalOriginX: number;
@@ -225,6 +341,9 @@ export class ParticleFieldNode extends Node {
   private readonly ticksLayer = new Node();
   private readonly tracerAidsLayer = new Node();
   private readonly particlesLayer = new Node();
+  // Probe marker + guide line (V4 addition, plane mode only) - drawn LAST/on top so the static marker stays
+  // legible even where a moving particle briefly passes behind it.
+  private readonly probeLayer = new Node();
 
   private currentMode: "plane" | "spherical" = "plane";
   private currentPixelsPerMeter = 1;
@@ -239,17 +358,25 @@ export class ParticleFieldNode extends Node {
   private tracerEquilibriumViewX = 0;
   private tracerEquilibriumViewY = 0;
 
+  // Tracks which representationMode styling (see applyRepresentationStyling() below) is CURRENTLY applied
+  // to the live Nodes, so redraw() only needs to touch stroke colors when the mode actually changes (or
+  // right after a rebuild() - see rebuild()'s own reset of this field - not on every single frame). null
+  // forces a (re)application on the very next redraw(), which rebuild() relies on since it creates brand
+  // new, unstyled Nodes every time it runs.
+  private lastStyledRepresentationMode: RepresentationMode | null = null;
+
   public constructor(model: SoundWavesModel, options: ParticleFieldNodeOptions) {
     super();
 
     this.model = model;
     this.viewZoomProperty = options.viewZoomProperty;
+    this.representationModeProperty = options.representationModeProperty;
     this.planeOriginX = options.planeOriginX;
     this.planeOriginY = options.planeOriginY;
     this.sphericalOriginX = options.sphericalOriginX;
     this.sphericalOriginY = options.sphericalOriginY;
 
-    this.children = [this.ticksLayer, this.tracerAidsLayer, this.particlesLayer];
+    this.children = [this.ticksLayer, this.tracerAidsLayer, this.particlesLayer, this.probeLayer];
 
     Multilink.multilink([this.viewZoomProperty, model.propagationModeProperty, model.speedOfSoundProperty], () => this.rebuild());
   }
@@ -277,6 +404,8 @@ export class ParticleFieldNode extends Node {
     this.ticksLayer.children = [];
     this.tracerAidsLayer.children = [];
     this.particlesLayer.children = [];
+    this.probeLayer.children = []; // probe is plane-mode-only (see buildProbe()) - cleared unconditionally
+    // here so switching INTO spherical mode leaves it empty, matching the paired graph's own plane-only visibility.
     this.particles = [];
     this.tracerIndex = -1;
     this.tracerRing = null;
@@ -287,6 +416,14 @@ export class ParticleFieldNode extends Node {
     } else {
       this.rebuildSpherical(visibleWidthMeters / 2);
     }
+
+    // Every Node just (re)created above starts out with Real-mode's default (unstyled) look, regardless of
+    // representationModeProperty's actual current value - forcing a (re)application on the very next
+    // redraw() below, rather than relying on lastStyledRepresentationMode having genuinely "changed" (it
+    // may well still equal the current mode from before this rebuild), is what keeps a rebuild (e.g. a
+    // zoom change while already in Pedagogical mode) from silently reverting styling until the mode is
+    // next toggled.
+    this.lastStyledRepresentationMode = null;
 
     this.redraw();
   }
@@ -337,6 +474,7 @@ export class ParticleFieldNode extends Node {
     }
 
     this.buildTracerAids();
+    this.buildProbe(pixelsPerMeter);
   }
 
   private rebuildSpherical(maxRadiusMeters: number): void {
@@ -420,7 +558,54 @@ export class ParticleFieldNode extends Node {
     this.tracerAidsLayer.children = [this.tracerTether, this.tracerRing];
   }
 
+  /** Builds the plane-mode-only probe marker (diamond) + guide line at the fixed physical position
+   * PROBE_POSITION_METERS, converted to screen x via the CURRENT pixelsPerMeter - called once per
+   * rebuildPlane() (i.e. on construction and on every zoom/propagation-mode change), never per-frame. Both
+   * Nodes are positioned here and ONLY here; redraw() never touches probeLayer, which is what keeps this
+   * marker's y fixed at planeOriginY (the row's own vertical center) and its x fixed between rebuilds - see
+   * this class's own V4 doc-comment paragraph above for why. */
+  private buildProbe(pixelsPerMeter: number): void {
+    const xView = this.planeOriginX + PROBE_POSITION_METERS * pixelsPerMeter;
+
+    const guideLine = new Line(xView, this.planeOriginY - PROBE_GUIDE_HALF_HEIGHT, xView, this.planeOriginY + PROBE_GUIDE_HALF_HEIGHT, {
+      stroke: PROBE_GUIDE_STROKE,
+      lineWidth: 1,
+      lineDash: PROBE_GUIDE_LINE_DASH,
+    });
+
+    // Diamond outline (Shape+Path, matching this sim's schematic-primitives convention, e.g.
+    // CompressionTrackerNode.ts's own triangle) - a shape used nowhere else in this file, so it can't be
+    // confused with the tracer's circle or the compression tracker's triangle/ring even in silhouette alone.
+    const diamondShape = new Shape()
+      .moveTo(0, -PROBE_MARKER_HALF_HEIGHT)
+      .lineTo(PROBE_MARKER_HALF_WIDTH, 0)
+      .lineTo(0, PROBE_MARKER_HALF_HEIGHT)
+      .lineTo(-PROBE_MARKER_HALF_WIDTH, 0)
+      .close();
+    const marker = new Path(diamondShape, {
+      fill: PROBE_FILL,
+      stroke: PROBE_STROKE,
+      lineWidth: 1,
+      x: xView,
+      y: this.planeOriginY,
+    });
+
+    this.probeLayer.children = [guideLine, marker];
+  }
+
   private redraw(): void {
+    // representationModeProperty is read HERE ONLY - never inside rebuild()/the geometry Multilink above -
+    // so a mode switch never re-lays-out the field (see RepresentationMode's own doc comment above and
+    // this class's own doc comment). Only actually restyles when the mode has changed since the last
+    // redraw() (or right after a rebuild() reset this to null) - see lastStyledRepresentationMode's own
+    // comment - so ordinary frames (no mode change) pay no extra per-frame cost beyond the usual
+    // position updates below.
+    const representationMode = this.representationModeProperty.value;
+    if (representationMode !== this.lastStyledRepresentationMode) {
+      this.applyRepresentationStyling(representationMode);
+      this.lastStyledRepresentationMode = representationMode;
+    }
+
     if (this.currentMode === "plane") {
       this.redrawPlane();
     } else {
@@ -430,6 +615,39 @@ export class ParticleFieldNode extends Node {
     if (this.tracerTether !== null && this.tracerIndex >= 0) {
       const tracerParticle = this.particles[this.tracerIndex];
       this.tracerTether.setLine(this.tracerEquilibriumViewX, this.tracerEquilibriumViewY, tracerParticle.x, tracerParticle.y);
+    }
+  }
+
+  /** Styling-only Pedagogical contrast boost (V3 addition, see the constants' own comments above) - NO
+   * geometry, count, or position changes: every Node touched here already exists (created by rebuild()),
+   * only fill/stroke colors/widths change. In 'real' mode, restores each Node's ORIGINAL Real-mode look
+   * exactly (ordinary particles: original PARTICLE_FILL, no stroke at all; ticks/tracer ring/tether: their
+   * original, lower-contrast colors) - so switching back to Real never leaves any Pedagogical styling
+   * behind. MUST-FIX (pedagogy re-review): ordinary particles now also swap FILL (not just stroke) in
+   * Pedagogical mode - see PEDAGOGICAL_PARTICLE_FILL's own comment for why a thin stroke alone wasn't
+   * enough contrast against bold rarefaction bands. */
+  private applyRepresentationStyling(mode: RepresentationMode): void {
+    const pedagogical = mode === "pedagogical";
+
+    for (let i = 0; i < this.particles.length; i++) {
+      if (i === this.tracerIndex) {
+        continue; // the tracer particle keeps its own always-on TRACER_FILL/TRACER_STROKE in both modes - untouched here.
+      }
+      const particle = this.particles[i];
+      particle.fill = pedagogical ? PEDAGOGICAL_PARTICLE_FILL : PARTICLE_FILL;
+      particle.stroke = pedagogical ? PEDAGOGICAL_PARTICLE_STROKE : null;
+      particle.lineWidth = PEDAGOGICAL_PARTICLE_STROKE_WIDTH;
+    }
+
+    for (const tick of this.ticksLayer.children) {
+      (tick as Line | Circle).stroke = pedagogical ? PEDAGOGICAL_TICK_STROKE : TICK_STROKE;
+    }
+
+    if (this.tracerRing !== null) {
+      this.tracerRing.stroke = pedagogical ? PEDAGOGICAL_TRACER_RING_STROKE : TRACER_RING_STROKE;
+    }
+    if (this.tracerTether !== null) {
+      this.tracerTether.stroke = pedagogical ? PEDAGOGICAL_TRACER_TETHER_STROKE : TRACER_TETHER_STROKE;
     }
   }
 
