@@ -2,7 +2,7 @@ import { DerivedProperty } from "scenerystack/axon";
 import { RichText, Text, VBox } from "scenerystack/scenery";
 import { Dialog } from "scenerystack/sim";
 import { PhetFont } from "scenerystack/scenery-phet";
-import { AIR_DENSITY, AMPLITUDE_SAFETY_FRACTION, angularFrequency, SoundWavesModel, strictAmplitudeBound } from "../model/SoundWavesModel.js";
+import { AIR_DENSITY, AMPLITUDE_SAFETY_FRACTION, SPHERICAL_SOURCE_RADIUS, angularFrequency, SoundWavesModel, strictAmplitudeBound, strictRadialAmplitudeBound } from "../model/SoundWavesModel.js";
 
 const TITLE_FONT = new PhetFont({ size: 18, weight: "bold" });
 const BODY_FONT = new PhetFont(14);
@@ -25,6 +25,17 @@ export class HowThisWorksDialog extends Dialog {
       const strictBound = strictAmplitudeBound(wavelength);
       const cap = AMPLITUDE_SAFETY_FRACTION * strictBound;
       return `Current strict bound: &lambda;/(2&pi;) = ${strictBound.toFixed(3)} m. Current allowed maximum (${AMPLITUDE_SAFETY_FRACTION * 100}% of that): ${cap.toFixed(3)} m.`;
+    });
+
+    const sphericalValuesLineProperty = new DerivedProperty([model.sphericalAmplitudeProperty, model.wavelengthProperty], (amplitudeAtSourceRadius, wavelength) => {
+      const k = (2 * Math.PI) / wavelength;
+      return `&xi;<sub>max</sub>(r<sub>0</sub>) = ${amplitudeAtSourceRadius.toFixed(3)} m at r<sub>0</sub> = ${SPHERICAL_SOURCE_RADIUS} m, k = ${k.toFixed(2)} rad/m.`;
+    });
+
+    const sphericalCapLineProperty = new DerivedProperty([model.wavelengthProperty], (wavelength) => {
+      const strictRadialBound = strictRadialAmplitudeBound(wavelength, SPHERICAL_SOURCE_RADIUS);
+      const cap = AMPLITUDE_SAFETY_FRACTION * strictRadialBound;
+      return `Current strict bound: 1/(k + 1/r<sub>0</sub>) = ${strictRadialBound.toFixed(3)} m. Current allowed maximum: ${cap.toFixed(3)} m ` + `(stricter than the plane-wave bound above, since amplitude here also falls off with r).`;
     });
 
     const content = new VBox({
@@ -50,6 +61,22 @@ export class HowThisWorksDialog extends Dialog {
         new RichText(valuesLineProperty, { font: BODY_FONT, maxWidth: CONTENT_WIDTH }),
         new RichText(`Air density &rho; = ${AIR_DENSITY} kg/m<sup>3</sup> (room temperature, dry air).`, { font: BODY_FONT, maxWidth: CONTENT_WIDTH }),
 
+        new Text("Spherical wave mode", { font: TITLE_FONT }),
+        new RichText("&xi;<sub>r</sub>(r,t) = &xi;<sub>max</sub>(r<sub>0</sub>) &sdot; (r<sub>0</sub>/r) &sdot; sin(kr &minus; &omega;t)", { font: BODY_FONT, maxWidth: CONTENT_WIDTH }),
+        new RichText(
+          "The same traveling wave, but spreading outward from a point source instead of moving in one direction. Amplitude falls off as 1/r (NOT 1/r<sup>2</sup> - that is " +
+            "the INTENSITY law, since intensity &prop; amplitude<sup>2</sup> and power through any enclosing sphere is conserved), anchored at a small finite source radius " +
+            "r<sub>0</sub> standing in for the point source. u<sub>r</sub> and p&prime; keep the same phase relationship to &xi;<sub>r</sub> as in the plane-wave case above.",
+          { font: BODY_FONT, maxWidth: CONTENT_WIDTH },
+        ),
+        new RichText(sphericalValuesLineProperty, { font: BODY_FONT, maxWidth: CONTENT_WIDTH }),
+        new RichText(
+          "Because amplitude also falls off with r, the amplitude-overtaking limit is STRICTER than the plane wave's: &xi;<sub>max</sub>(r<sub>0</sub>) &lt; 1/(k + 1/r<sub>0</sub>), " +
+            "not the plane wave's simpler &lambda;/(2&pi;).",
+          { font: BODY_FONT, maxWidth: CONTENT_WIDTH },
+        ),
+        new RichText(sphericalCapLineProperty, { font: BODY_FONT, maxWidth: CONTENT_WIDTH }),
+
         new Text("What this model assumes", { font: TITLE_FONT }),
         new RichText(
           "The particle motion you see is EXAGGERATED for visibility - real sound-wave displacements are far too small " +
@@ -69,6 +96,11 @@ export class HowThisWorksDialog extends Dialog {
           font: BODY_FONT,
           maxWidth: CONTENT_WIDTH,
         }),
+        new RichText(
+          `Spherical mode is a FAR-FIELD approximation with a small finite source radius (r<sub>0</sub> = ${SPHERICAL_SOURCE_RADIUS} m) standing in for a true point source - ` +
+            "it does not attempt to reproduce a real point monopole's near-field behavior close to the source itself.",
+          { font: BODY_FONT, maxWidth: CONTENT_WIDTH },
+        ),
       ],
     });
 

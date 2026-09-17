@@ -7,6 +7,7 @@ import {
   FREQUENCY_RANGE,
   MAX_SUPPORTED_DISTANCE,
   PRESSURE_SAMPLE_COUNT,
+  PROBE_POSITION_METERS,
   SPHERICAL_SOURCE_RADIUS,
   SoundWavesModel,
   angularFrequency,
@@ -19,6 +20,7 @@ import {
   velocityAtRetardedPhase,
   wavelength,
 } from "./SoundWavesModel.js";
+import type { PlaybackSpeed } from "./SoundWavesModel.js";
 
 // Property range violations only throw once assertions are enabled (see
 // node_modules/scenerystack/src/axon/js/validate.ts) - enableAssert() does this during the dev
@@ -113,7 +115,7 @@ describe("SoundWavesModel construction and defaults", () => {
   it("starts at rest (no time has passed yet) and playing", () => {
     const model = new SoundWavesModel();
     expect(model.isPlayingProperty.value).toBe(true);
-    expect(model.isSlowMotionProperty.value).toBe(false);
+    expect(model.playbackSpeedProperty.value).toBe("normal");
     for (const xi of model.displacements) {
       expect(xi).toBe(0);
     }
@@ -131,6 +133,14 @@ describe("SoundWavesModel construction and defaults", () => {
     expect(model.samplePositions.length).toBe(PRESSURE_SAMPLE_COUNT);
     expect(model.samplePositions[0]).toBe(0);
     expect(model.samplePositions[PRESSURE_SAMPLE_COUNT - 1]).toBeCloseTo(DOMAIN_LENGTH, 10);
+  });
+
+  it("PROBE_POSITION_METERS sits strictly inside [0, DOMAIN_LENGTH] and is sampleable", () => {
+    expect(PROBE_POSITION_METERS).toBeGreaterThan(0);
+    expect(PROBE_POSITION_METERS).toBeLessThan(DOMAIN_LENGTH);
+    const model = new SoundWavesModel();
+    const sample = model.sampleAt(PROBE_POSITION_METERS);
+    expect(Number.isFinite(sample.pressure)).toBe(true);
   });
 
   it("default frequency is within FREQUENCY_RANGE and default amplitude is within its live cap", () => {
@@ -396,12 +406,12 @@ describe("reset", () => {
       frequency: model.frequencyProperty.value,
       amplitude: model.amplitudeProperty.value,
       isPlaying: model.isPlayingProperty.value,
-      isSlowMotion: model.isSlowMotionProperty.value,
+      playbackSpeed: model.playbackSpeedProperty.value,
     };
 
     model.frequencyProperty.value = FREQUENCY_RANGE.max;
     model.amplitudeProperty.value = model.amplitudeProperty.range.max * 0.5; // nonzero, so the model actually moves
-    model.isSlowMotionProperty.value = true;
+    model.playbackSpeedProperty.value = "ultraSlow";
     stepModel(model, 0.3);
 
     // Sanity: the model actually advanced before reset.
@@ -412,7 +422,7 @@ describe("reset", () => {
     expect(model.frequencyProperty.value).toBe(defaults.frequency);
     expect(model.amplitudeProperty.value).toBeCloseTo(defaults.amplitude, 10);
     expect(model.isPlayingProperty.value).toBe(defaults.isPlaying);
-    expect(model.isSlowMotionProperty.value).toBe(defaults.isSlowMotion);
+    expect(model.playbackSpeedProperty.value).toBe(defaults.playbackSpeed);
 
     for (const xi of model.displacements) {
       expect(xi).toBe(0);
@@ -619,5 +629,300 @@ describe("propagationModeProperty", () => {
     expect(model.propagationModeProperty.value).toBe("spherical");
     model.reset();
     expect(model.propagationModeProperty.value).toBe("plane");
+  });
+});
+
+// ---- playbackSpeedProperty / Ultra Slow (V3 refinement) ----
+
+describe("playbackSpeedProperty", () => {
+  it("defaults to 'normal'", () => {
+    const model = new SoundWavesModel();
+    expect(model.playbackSpeedProperty.value).toBe("normal");
+  });
+
+  it("resets to 'normal' after being changed", () => {
+    const model = new SoundWavesModel();
+    model.playbackSpeedProperty.value = "ultraSlow";
+    expect(model.playbackSpeedProperty.value).toBe("ultraSlow");
+    model.reset();
+    expect(model.playbackSpeedProperty.value).toBe("normal");
+  });
+});
+
+describe("timescale arithmetic at ultraSlow: sourcePhase advances proportionally to frequency*timeScale, not frequency alone", () => {
+  it("doubling frequency exactly doubles the accumulated phase (equivalent to halving the oscillation period) for the same elapsed real time", () => {
+    // Two independent models, one at exactly double the other's frequency, both run at ultraSlow
+    // (timeScale=0.001) for the SAME real elapsed time. If sourcePhase correctly integrates
+    // omega*timeScale*dt every step (not just omega*dt), the resulting closed-form displacement at x=0
+    // (retarded distance ~0, so no propagation-delay complication) must match sin(omega*timeScale*T) for
+    // EACH model's own omega - i.e. accumulated phase is exactly proportional to frequency*timeScale, so
+    // doubling frequency exactly doubles it.
+    const lowFrequency = 200;
+    const highFrequency = 400; // exactly double, both within FREQUENCY_RANGE
+    const modelLow = new SoundWavesModel();
+    const modelHigh = new SoundWavesModel();
+    modelLow.frequencyProperty.value = lowFrequency;
+    modelHigh.frequencyProperty.value = highFrequency;
+    modelLow.playbackSpeedProperty.value = "ultraSlow";
+    modelHigh.playbackSpeedProperty.value = "ultraSlow";
+
+    const dt = 1 / 200;
+    const totalRealTime = 0.4; // s of REAL elapsed time - past RAMP_TIME (0.25s), so both are fully ramped
+    const steps = Math.round(totalRealTime / dt);
+    for (let i = 0; i < steps; i++) {
+      modelLow.step(dt);
+      modelHigh.step(dt);
+    }
+
+    const ultraSlowTimeScale = 0.001; // matches ULTRA_SLOW_TIME_SCALE - re-stated here (not imported) so
+    // this test exercises the model's OWN observable behavior against an independently-stated expectation,
+    // rather than importing the exact constant the implementation uses internally.
+    const modelTime = totalRealTime * ultraSlowTimeScale;
+
+    const expectedLow = -modelLow.amplitudeProperty.value * Math.sin(2 * Math.PI * lowFrequency * modelTime);
+    const expectedHigh = -modelHigh.amplitudeProperty.value * Math.sin(2 * Math.PI * highFrequency * modelTime);
+
+    expect(modelLow.sampleAt(0).displacement).toBeCloseTo(expectedLow, 4);
+    expect(modelHigh.sampleAt(0).displacement).toBeCloseTo(expectedHigh, 4);
+  });
+});
+
+describe("propagation speed and oscillation speed stay locked together at every playback speed (same timeScale governs both)", () => {
+  const timeScaleBySpeed: Record<PlaybackSpeed, number> = { normal: 1, slow: 0.25, ultraSlow: 0.001 };
+
+  it.each(["normal", "slow", "ultraSlow"] as const)("matches the closed-form xi(x,t), with model time = (real elapsed time) * timeScale, at speed=%s", (speed) => {
+    const model = new SoundWavesModel();
+    model.frequencyProperty.value = 250;
+    model.playbackSpeedProperty.value = speed;
+
+    const x = 0.5; // m
+    const timeScale = timeScaleBySpeed[speed];
+    const speedOfSound = model.speedOfSoundProperty.value;
+    // Real elapsed time = (real time for the wavefront to travel to x at THIS speed) + a fixed 0.3s real
+    // margin (> RAMP_TIME) - so the wavefront has always arrived AND the ramp is always complete, by
+    // construction, regardless of speed (this is exactly the point of the RAMP_TIME fix - ramp duration
+    // is fixed in REAL seconds).
+    const travelTimeReal = x / speedOfSound / timeScale;
+    const totalRealTime = travelTimeReal + 0.3;
+
+    const dt = 1 / 200;
+    const steps = Math.round(totalRealTime / dt);
+    // Use the ACTUAL stepped real time (steps*dt), not the originally-intended totalRealTime, for every
+    // downstream calculation below - totalRealTime/dt is not generally an integer (travelTimeReal isn't a
+    // clean multiple of dt), so rounding `steps` to the nearest integer means the model actually experiences
+    // a slightly different total real time than totalRealTime itself. At this test's frequency (250 Hz),
+    // even a sub-dt timing difference is a meaningfully large phase error (omega is large), so this
+    // distinction matters here, unlike in tests that pick round numbers of steps.
+    const actualRealTime = steps * dt;
+    for (let i = 0; i < steps; i++) {
+      model.step(dt);
+    }
+
+    const modelTime = actualRealTime * timeScale; // if simulationTime and sourcePhase are governed by the
+    // SAME timeScale (the property under test), this exactly equals the model's actual simulationTime
+    const retardedTime = modelTime - x / speedOfSound;
+    const omega = angularFrequency(model.frequencyProperty.value);
+    const expectedDisplacement = -model.amplitudeProperty.value * Math.sin(omega * retardedTime); // ramp=1, real time since arrival is >= RAMP_TIME at every speed (actualRealTime - travelTimeReal is within one dt of the intended 0.3s margin)
+
+    expect(model.sampleAt(x).displacement).toBeCloseTo(expectedDisplacement, 4);
+  });
+});
+
+describe("RAMP_TIME fix: ramp duration is fixed in REAL (wall-clock) seconds, independent of playback speed", () => {
+  it("at ultraSlow, the amplitude ramp reaches ~1.0 after ~0.25s of WALL-CLOCK time, even though only a tiny fraction of a second of MODEL time has elapsed", () => {
+    const model = new SoundWavesModel();
+    model.frequencyProperty.value = 250;
+    model.playbackSpeedProperty.value = "ultraSlow";
+
+    const dt = 1 / 200;
+    const totalRealTime = 0.3; // s of REAL elapsed time - past RAMP_TIME (0.25s)
+    const steps = Math.round(totalRealTime / dt);
+    for (let i = 0; i < steps; i++) {
+      model.step(dt);
+    }
+
+    const ultraSlowTimeScale = 0.001;
+    const modelTime = totalRealTime * ultraSlowTimeScale; // ~0.0003s of MODEL time - tiny
+    const omega = angularFrequency(model.frequencyProperty.value);
+    const fullyRampedExpected = -model.amplitudeProperty.value * Math.sin(omega * modelTime); // assumes ramp=1
+
+    const actual = model.sampleAt(0).displacement;
+    expect(actual).toBeCloseTo(fullyRampedExpected, 4);
+
+    // Regression guard: this is NOT what the PRE-FIX behavior would have produced. The old code evaluated
+    // the ramp against the SCALED model-time value directly (here, modelTime itself, ~0.0003s) rather than
+    // real elapsed time - rampFactor at that tiny an input is many orders of magnitude below 1 (practically
+    // 0), which would have suppressed the displacement to near-zero instead of the near-full value above.
+    const oldPreFixRamp = rampFactor(modelTime, 0.25);
+    expect(oldPreFixRamp).toBeLessThan(0.001);
+    expect(Math.abs(actual)).toBeGreaterThan(Math.abs(fullyRampedExpected) * 0.9); // confirms the ACTUAL ramp is near-full, unlike oldPreFixRamp
+  });
+});
+
+describe("phaseHistory fix: large buffers at slow playback speeds do not cause an O(n) linear-scan performance cliff", () => {
+  it("many steps at ultraSlow (growing the history buffer to its large steady-state size) complete quickly", () => {
+    // At ultraSlow (timeScale=0.001), REQUIRED_HISTORY_DURATION (~0.133s of MODEL time) is not covered
+    // until roughly REQUIRED_HISTORY_DURATION/(dt*timeScale) ~= 0.133/(1/60*0.001) ~= 8000 real frames have
+    // elapsed - well within this test's step count, so a meaningful portion of this loop runs with the
+    // history buffer at its large ultraSlow steady-state size, exercising phaseAtTime()'s lookup (called
+    // PRESSURE_SAMPLE_COUNT=240 times per step, via recomputeSamples()) at that size.
+    const model = new SoundWavesModel();
+    model.playbackSpeedProperty.value = "ultraSlow";
+
+    const dt = 1 / 60;
+    const steps = 20000; // ~333s of real elapsed time - comfortably past the ~8000-frame threshold above
+
+    const start = Date.now();
+    for (let i = 0; i < steps; i++) {
+      model.step(dt);
+    }
+    const elapsedMs = Date.now() - start;
+
+    // A linear-scan-per-lookup implementation over an ~8000-entry buffer (240 lookups/step * 20000 steps)
+    // would be roughly 8000 * 240 * 20000 ~= a very large number of comparisons in the worst case, taking
+    // far longer than this. A generous threshold comfortably distinguishes "fixed" from "the old perf
+    // cliff" without being a flaky, tightly-tuned timing assertion.
+    expect(elapsedMs).toBeLessThan(5000);
+
+    for (const xi of model.displacements) {
+      expect(Number.isFinite(xi)).toBe(true);
+    }
+  });
+});
+
+describe("phase continuity across a speed change: switching playbackSpeedProperty mid-run never causes a discontinuous jump", () => {
+  it("displacement changes only by a tiny, speed-consistent amount immediately after switching from normal to ultraSlow", () => {
+    const model = new SoundWavesModel();
+    model.frequencyProperty.value = 250;
+    stepModel(model, 0.5); // run at normal speed - past ramp and wavefront arrival at x=0
+
+    const beforeSwitch = model.sampleAt(0).displacement;
+    model.playbackSpeedProperty.value = "ultraSlow";
+    const stepDt = 1 / 60;
+    model.step(stepDt); // a single step at the NEW speed
+    const afterSwitch = model.sampleAt(0).displacement;
+
+    // At ultraSlow (timeScale=0.001), one frame's dt only advances MODEL time by dt*0.001 - the resulting
+    // phase advance (and therefore the change in displacement, whose rate of change is bounded by
+    // amplitude*omega) can only be correspondingly tiny. A discontinuity (e.g. the phase/time accumulators
+    // resetting or jumping on a speed change) would instead produce a change on the order of the full
+    // amplitude, far exceeding this bound.
+    const ultraSlowTimeScale = 0.001;
+    const omega = angularFrequency(model.frequencyProperty.value);
+    const maxPossibleChange = model.amplitudeProperty.value * omega * stepDt * ultraSlowTimeScale * 2; // 2x margin
+    expect(Math.abs(afterSwitch - beforeSwitch)).toBeLessThan(maxPossibleChange);
+  });
+});
+
+describe("MUST-FIX (V3 physics re-review): mid-ramp speed switches never cause a ramp discontinuity, in EITHER direction", () => {
+  // Both tests sample at x=0, where retardedTime always exactly equals simulationTime (distance/c = 0), so
+  // the wavefront "arrives" at real (wall-clock) time exactly 0 - the very start of the run. That makes the
+  // CORRECT expected ramp trivial to state independently of the implementation: it is simply
+  // rampFactor(totalRealElapsedTime, RAMP_TIME), where totalRealElapsedTime is just the plain sum of every
+  // raw dt passed to step() so far, regardless of what playbackSpeedProperty was set to at each step. This
+  // lets each test compute an independent expected closed-form displacement (not just an approximate bound)
+  // and compare the model's actual output to it after a mid-ramp speed switch.
+  const RAMP_TIME = 0.25; // s - restated (not imported) to match the model's own private RAMP_TIME constant
+  const NORMAL_TIME_SCALE = 1;
+  const ULTRA_SLOW_TIME_SCALE = 0.001;
+
+  it("slow -> fast (Ultra Slow -> Normal) mid-ramp: the ramp does not drop discontinuously, and reaches full amplitude in ~RAMP_TIME real seconds total, not ~40% longer", () => {
+    const model = new SoundWavesModel();
+    const frequency = 250;
+    model.frequencyProperty.value = frequency;
+    model.playbackSpeedProperty.value = "ultraSlow";
+
+    const dt = 1 / 200;
+    let totalRealTime = 0;
+    let expectedSimulationTime = 0; // tracked independently, mirroring step()'s own scaledDt accumulation
+
+    // Run partway through the ramp at Ultra Slow - well under RAMP_TIME (0.25s) of REAL elapsed time, so the
+    // point is genuinely still mid-ramp when the speed switch below happens.
+    const ultraSlowRealTime = 0.1;
+    const ultraSlowSteps = Math.round(ultraSlowRealTime / dt);
+    for (let i = 0; i < ultraSlowSteps; i++) {
+      model.step(dt);
+      totalRealTime += dt;
+      expectedSimulationTime += dt * ULTRA_SLOW_TIME_SCALE;
+    }
+
+    // The switch happens WHILE mid-ramp (totalRealTime so far, 0.1s, is well under RAMP_TIME).
+    model.playbackSpeedProperty.value = "normal";
+    model.step(dt); // a single step at the NEW speed, immediately after the switch
+    totalRealTime += dt;
+    expectedSimulationTime += dt * NORMAL_TIME_SCALE;
+
+    const omega = angularFrequency(frequency);
+    const expectedRamp = rampFactor(totalRealTime, RAMP_TIME);
+    const expectedDisplacement = -model.amplitudeProperty.value * expectedRamp * Math.sin(omega * expectedSimulationTime);
+
+    const actual = model.sampleAt(0).displacement;
+    expect(actual).toBeCloseTo(expectedDisplacement, 4);
+
+    // Regression guard: the OLD buggy retardedTime/(CURRENT timeScale) approximation would, right after this
+    // switch, divide the (still tiny, since Ultra Slow barely advanced model time) accumulated retardedTime
+    // by the NEW timeScale (1) - producing a ramp estimate close to the pre-switch value's raw MODEL time,
+    // not the correct real-time-based one - a huge drop from the correct, well-progressed ramp above.
+    const oldBuggyRealTimeSinceArrival = expectedSimulationTime / NORMAL_TIME_SCALE; // retardedTime / new timeScale
+    const oldBuggyRamp = rampFactor(oldBuggyRealTimeSinceArrival, RAMP_TIME);
+    expect(oldBuggyRamp).toBeLessThan(expectedRamp * 0.1); // confirms the old formula really would have dropped hard here
+  });
+
+  it("fast -> slow (Normal -> Ultra Slow) mid-ramp does not SNAP the ramp up to ~1.0", () => {
+    const model = new SoundWavesModel();
+    const frequency = 250;
+    model.frequencyProperty.value = frequency;
+    model.playbackSpeedProperty.value = "ultraSlow";
+
+    const dt = 1 / 200;
+    let totalRealTime = 0;
+    let expectedSimulationTime = 0;
+
+    // A stretch of real time at Ultra Slow (the "long Ultra Slow session") - still well under RAMP_TIME.
+    const ultraSlowRealTime = 0.05;
+    const ultraSlowSteps = Math.round(ultraSlowRealTime / dt);
+    for (let i = 0; i < ultraSlowSteps; i++) {
+      model.step(dt);
+      totalRealTime += dt;
+      expectedSimulationTime += dt * ULTRA_SLOW_TIME_SCALE;
+    }
+
+    // "Switch to Normal to skip ahead" - briefly, only ONE frame, so the point is still clearly mid-ramp
+    // afterward (nowhere close to RAMP_TIME of real elapsed time).
+    model.playbackSpeedProperty.value = "normal";
+    model.step(dt);
+    totalRealTime += dt;
+    expectedSimulationTime += dt * NORMAL_TIME_SCALE;
+
+    // "Switch back to Ultra Slow" - the fast -> slow direction under test. Step one more (tiny) frame.
+    model.playbackSpeedProperty.value = "ultraSlow";
+    model.step(dt);
+    totalRealTime += dt;
+    expectedSimulationTime += dt * ULTRA_SLOW_TIME_SCALE;
+
+    // True total real elapsed time is still tiny (a few multiples of dt, ~0.06s) - nowhere near RAMP_TIME
+    // (0.25s) - so the CORRECT ramp must still be small, not anywhere near fully ramped.
+    expect(totalRealTime).toBeLessThan(RAMP_TIME * 0.5);
+
+    const omega = angularFrequency(frequency);
+    const expectedRamp = rampFactor(totalRealTime, RAMP_TIME);
+    const expectedDisplacement = -model.amplitudeProperty.value * expectedRamp * Math.sin(omega * expectedSimulationTime);
+
+    const actual = model.sampleAt(0).displacement;
+    expect(actual).toBeCloseTo(expectedDisplacement, 4);
+    // Confirms the correct ramp genuinely is still small (not a vacuous check that would pass even if the
+    // fix silently produced a full ramp for some other reason).
+    expect(expectedRamp).toBeLessThan(0.5);
+
+    // Regression guard: the OLD buggy retardedTime/(CURRENT timeScale) approximation would, right after this
+    // last switch back to Ultra Slow, divide the accumulated retardedTime (dominated by the ONE normal-speed
+    // step, since that step alone advanced model time ~1000x more than either Ultra Slow stretch) by the NEW,
+    // tiny timeScale (0.001) - producing a hugely inflated real-time-since-arrival estimate that blows well
+    // past RAMP_TIME, snapping the ramp to ~1.0 in one frame even though the point is genuinely still early
+    // in its ramp.
+    const oldBuggyRealTimeSinceArrival = expectedSimulationTime / ULTRA_SLOW_TIME_SCALE; // retardedTime / new timeScale
+    const oldBuggyRamp = rampFactor(oldBuggyRealTimeSinceArrival, RAMP_TIME);
+    expect(oldBuggyRamp).toBeGreaterThan(0.99); // confirms the old formula really would have snapped to ~full ramp here
+    expect(oldBuggyRamp).toBeGreaterThan(expectedRamp * 5); // a large, clearly-discontinuous jump vs. the correct value
   });
 });

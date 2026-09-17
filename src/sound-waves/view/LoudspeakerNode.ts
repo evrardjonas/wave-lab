@@ -1,7 +1,7 @@
 import type { TReadOnlyProperty } from "scenerystack/axon";
 import { Circle, Node, Rectangle } from "scenerystack/scenery";
 import { SPHERICAL_SOURCE_RADIUS, SoundWavesModel } from "../model/SoundWavesModel.js";
-import { pixelsPerMeterForZoom, type ViewZoom } from "./ParticleFieldNode.js";
+import { pixelsPerMeterForZoom, sphericalPixelsPerMeterForZoom, type ViewZoom } from "./ParticleFieldNode.js";
 
 // This file is VIEW code. Schematic (non-photorealistic) styling, matching the established
 // Standing Waves convention (see StringNode.ts's oscillator post+disc) - simple shapes, not an
@@ -99,7 +99,12 @@ export type PointSourceNodeOptions = {
  */
 export class PointSourceNode extends Circle {
   public constructor(options: PointSourceNodeOptions) {
-    const pixelsPerMeter = pixelsPerMeterForZoom(options.viewZoomProperty.value);
+    // PointSourceNode only ever appears in SPHERICAL mode (see SoundWavesScreenView.ts's mode-visibility
+    // link), so it must use sphericalPixelsPerMeterForZoom - the SAME spherical-only scale the particle
+    // rings, pressure shading rings, and compression-tracker rings use (see that function's doc comment
+    // in ParticleFieldNode.ts) - never the plane-mode-shared pixelsPerMeterForZoom, or this icon would be
+    // sized on a different scale than the field surrounding it.
+    const pixelsPerMeter = sphericalPixelsPerMeterForZoom(options.viewZoomProperty.value);
     super(SPHERICAL_SOURCE_RADIUS * pixelsPerMeter, {
       fill: POINT_SOURCE_FILL,
       stroke: POINT_SOURCE_STROKE,
@@ -111,7 +116,7 @@ export class PointSourceNode extends Circle {
     // The icon's own radius should track zoom (it represents a fixed physical size, SPHERICAL_SOURCE_RADIUS,
     // which occupies fewer pixels at Field zoom's smaller scale) even though it never animates otherwise.
     options.viewZoomProperty.lazyLink((zoom) => {
-      this.radius = SPHERICAL_SOURCE_RADIUS * pixelsPerMeterForZoom(zoom);
+      this.radius = SPHERICAL_SOURCE_RADIUS * sphericalPixelsPerMeterForZoom(zoom);
     });
   }
 }

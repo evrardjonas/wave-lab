@@ -5,6 +5,16 @@ import type { TReadOnlyProperty } from "scenerystack/axon";
 /** View state: a rightward-only 'plane' wave, or a 'spherical' wave radiating from a point source. */
 export type PropagationMode = "plane" | "spherical";
 
+/** Physics playback speed, selected via playbackSpeedProperty (see TIME_SCALE_BY_SPEED below). Kept as
+ * a plain physics-only StringUnionProperty - same reasoning/idiom as PropagationMode above - rather than
+ * importing scenery-phet's TimeSpeed enum (a VIEW module; see the module-responsibility table in the
+ * scenerystack skill's architecture.md) into model code. Unlike the OLD isSlowMotionProperty/TimeSpeed
+ * bridging this replaces, the view's PlaybackSpeedControl (see view/PlaybackSpeedControl.ts) now binds
+ * DIRECTLY to this Property - no bridging Property/link needed - since TimeControlNode's built-in speed
+ * radio group is disabled entirely (timeSpeedProperty: null) in favor of this custom 3-way control (its
+ * closed TimeSpeed enum has only FAST/NORMAL/SLOW, with no ultra-slow member to repurpose). */
+export type PlaybackSpeed = "normal" | "slow" | "ultraSlow";
+
 /**
  * SoundWavesModel — a single rightward-traveling 1D longitudinal acoustic plane wave, radiated
  * continuously from a loudspeaker at x=0. There is no reflection and no superposition in this sim
@@ -56,6 +66,40 @@ export type PropagationMode = "plane" | "spherical";
  * instant-everywhere-on-an-amplitude-or-frequency-change behavior is a simplification, verified bounded
  * by physics review.
  *
+ * PLAYBACK SPEED / RAMP-TIME INDEPENDENCE (V3 refinement, added on top of the above): playbackSpeedProperty
+ * (normal/slow/ultraSlow, see TIME_SCALE_BY_SPEED) scales sourcePhase's and simulationTime's advancement
+ * per step() identically (a single shared "clock" genuinely drives both - see step() below), so oscillation
+ * rate and propagation speed always stay locked together at every speed setting, exactly like the wave's
+ * own w=2*pi*f and c=w/k relationships already require. The amplitude RAMP (RAMP_TIME, rampFactor() below)
+ * is DELIBERATELY EXEMPT from this scaling: it must be fed REAL elapsed-time-since-arrival, not the SCALED
+ * model-time-since-arrival directly (which would make its real-world duration RAMP_TIME/timeScale).
+ *
+ * MUST-FIX (V3 physics re-review): an earlier version of this fix approximated real-elapsed-time-since-
+ * arrival as (scaled model-time-since-arrival) / (CURRENT timeScale), clamped to a separate unscaled
+ * wall-clock accumulator as a sanity ceiling. That approximation is only exact if timeScale hasn't changed
+ * since the point's own wavefront arrival - dividing by the CURRENT scale after a mid-ramp speed change
+ * produced a genuine one-frame amplitude discontinuity in BOTH directions (slow->fast: the ramp estimate
+ * suddenly drops, since the same elapsed model-time now divides by a much larger timeScale; fast->slow: it
+ * suddenly jumps up, dividing by a much smaller timeScale) - and the "ceiling" did not actually guard the
+ * fast->slow direction despite its old doc comment's claim.
+ *
+ * FIX: phaseHistory (see its own doc comment below) now also records unscaledElapsedTime at each push, not
+ * just phase - so sampleAtRetardedDistance() can look up the EXACT unscaledElapsedTime that was in effect
+ * at the point's own arrival model-time (this.simulationTime - retardedTime, i.e. the absolute model time
+ * at which retardedTime itself crossed 0 for this point), via the same interpolated-history-lookup
+ * mechanism phaseAtTime() already uses for phase (see interpolateHistoryValue()). Real elapsed time since
+ * arrival is then simply (current unscaledElapsedTime) - (unscaledElapsedTime at arrival) - an EXACT
+ * reconstruction of the point's own real-time history, independent of any timeScale changes that happened
+ * after arrival, not an approximation that needs a separate sanity-ceiling clamp at all (removed entirely,
+ * along with the retardedTime/timeScale approximation itself). See REQUIRED_HISTORY_DURATION for why the
+ * buffer is sized to always retain a point's arrival entry for as long as it could still be mid-ramp, and
+ * sampleAtRetardedDistance() for the lookup itself.
+ *
+ * The net effect: a student always sees roughly the same ~0.25 REAL second smoothing transition as the
+ * wavefront visibly passes a point, regardless of playback speed - including across a speed change that
+ * happens mid-ramp, in either direction - see RAMP_TIME's own comment and sampleAtRetardedDistance() (it is
+ * a display-smoothing device, not real acoustic physics, unlike everything else in this file).
+ *
  * SPHERICAL MODE (added as a substantial refinement on top of the plane-wave model above): an
  * alternative propagation mode, selected via propagationModeProperty, in which the SAME retarded-time
  * phase-accumulator machinery (sourcePhase/simulationTime/phaseHistory/phaseAtTime()/rampFactor(),
@@ -77,9 +121,25 @@ export type PropagationMode = "plane" | "spherical";
 export const DOMAIN_LENGTH = 4; // m
 
 // Number of evenly-spaced points across [0, DOMAIN_LENGTH] at which displacement/pressure are cached
-// every step() - used by the pressure graph (a smooth curve needs finer resolution than the particle
-// field's ~16 columns). Purely a display-resolution choice, not a physics parameter.
+// every step() - originally used directly by the pressure graph; PressureGraphNode.ts now instead reads
+// model.sampleAt(x) at its OWN zoom-aware cached positions (see that file), reusing this same count as
+// its Local-zoom baseline density so the two stay conceptually tied together. This array is otherwise
+// retained for SoundWavesModel.test.ts's existing coverage. Purely a display-resolution choice, not a
+// physics parameter.
 export const PRESSURE_SAMPLE_COUNT = 240;
+
+// Fixed physical x-position (m) of the pressure probe - a single, always-on-in-plane-mode measurement
+// point. Rendered as a STATIC marker (fixed x AND y) in ParticleFieldNode.ts's particle field, and as a
+// pressure-driven "boat" (fixed x, y follows pressure) in PressureGraphNode.ts's graph - see those files
+// for the view-side rendering; this is the one shared physical constant both read so their two markers can
+// never drift apart in x. Chosen to sit comfortably inside BOTH zoom levels' visible domain
+// (Local: [0, DOMAIN_LENGTH] = [0, 4]; Field: [0, 16], see ParticleFieldNode.ts's VIEW_WIDTH_METERS), and
+// clear of both the source (x=0, where the loudspeaker/point-source icon sits) and the right-edge margin
+// plane-mode particle columns stay clear of (see ParticleFieldNode.ts's FIRST_COLUMN_X=0.2m and
+// computeRightMargin(), which at FREQUENCY_RANGE.min leaves plane-mode columns spanning roughly
+// [0.2, 3.5]m even at the tightest, Local, zoom). 1.5 m sits well inside that range at Local zoom (not
+// crowded against either edge) and is equally unobtrusive within Field zoom's much wider [0, 16]m range.
+export const PROBE_POSITION_METERS = 1.5; // m
 
 // ---- Physical constants, modeled as Properties (not inlined literals) ----
 
@@ -213,20 +273,48 @@ export function sphericalAmplitudeAtRadius(amplitudeAtSourceRadius: number, sour
   return (amplitudeAtSourceRadius * sourceRadius) / Math.max(r, sourceRadius);
 }
 
-// How long (seconds) a point's displayed amplitude takes to ramp from 0 to full once the wavefront
-// reaches it, keyed to that point's own LOCAL elapsed active time (time since ITS retarded time became
-// non-negative) - avoids an instantaneous-onset discontinuity at the wavefront. Mirrors Standing
-// Waves' DRIVE_RAMP_TIME (0.2-0.3s range).
+// How long (REAL, wall-clock seconds - see the class doc's PLAYBACK SPEED / RAMP-TIME INDEPENDENCE
+// paragraph and unscaledElapsedTime's own field comment) a point's displayed amplitude takes to ramp
+// from 0 to full once the wavefront reaches it, keyed to that point's own LOCAL elapsed active time
+// (real time since ITS retarded time became non-negative) - avoids an instantaneous-onset discontinuity
+// at the wavefront. Mirrors Standing Waves' DRIVE_RAMP_TIME (0.2-0.3s range).
+//
+// MUST-FIX (V3 physics review): this must be evaluated against UNSCALED wall-clock time, never scaled
+// model time. Evaluating it against scaled model time (the pre-fix behavior) would make its REAL-world
+// duration RAMP_TIME/timeScale - at ultraSlow (timeScale=0.001) that is ~250 real seconds (well over a
+// hundred oscillation cycles at this sim's default frequency), defeating the entire point of Ultra Slow
+// (watching a single clean cycle unfold slowly). See sampleAtRetardedDistance() for the fix itself.
 const RAMP_TIME = 0.25; // s
 
 // PhET convention for a "slow motion" TimeControlNode setting: run physics at 1/4 real-time speed.
 const SLOW_MOTION_TIME_SCALE = 0.25;
+
+// Ultra Slow (V3 addition): run physics at 1/1000 real-time speed - slow enough that a single oscillation
+// cycle (period = 1/frequency of MODEL time; e.g. 4 ms at this sim's default 250 Hz) takes
+// period/timeScale = 0.004/0.001 = 4 REAL seconds to unfold, comfortably watchable, rather than being
+// imperceptibly fast the way it would be even at SLOW_MOTION_TIME_SCALE's more modest 1/4 speed.
+const ULTRA_SLOW_TIME_SCALE = 0.001;
+
+// Single lookup table driving BOTH sourcePhase's and simulationTime's per-step scaling (see step() below) -
+// keeping them keyed off the SAME Record/Property means oscillation rate and propagation speed can never
+// drift out of lockstep at any speed setting, by construction (there is only one place a speed setting maps
+// to a numeric scale factor).
+const TIME_SCALE_BY_SPEED: Record<PlaybackSpeed, number> = {
+  normal: 1,
+  slow: SLOW_MOTION_TIME_SCALE,
+  ultraSlow: ULTRA_SLOW_TIME_SCALE,
+};
 
 // Defensive cap on a single step(dt)'s incoming dt, guarding against a stalled/backgrounded tab
 // producing one huge dt on resume - mirrors Standing Waves' MAX_STEP_DT. A huge, unclamped dt here
 // would also make the retarded-time history buffer's lookup window (sized for normal frame deltas)
 // miss its coverage target.
 const MAX_STEP_DT = 1 / 30;
+
+// Fixed dt used by stepOnce() (the "step forward" button) - one nominal frame at a conventional 60fps,
+// regardless of the display's actual refresh rate, so a manual step always advances a small, predictable
+// amount.
+const MANUAL_STEP_DT = 1 / 60;
 
 // ---- Retarded-time history buffer sizing ----
 
@@ -248,10 +336,19 @@ const MIN_PLAUSIBLE_SPEED_OF_SOUND = 300; // m/s
 // sizing) so the two concerns can never accidentally re-couple.
 export const MAX_SUPPORTED_DISTANCE = 20; // m
 
-// The buffer must cover at least MAX_SUPPORTED_DISTANCE / c_min seconds of history so the retarded-time
-// lookup for the farthest point this sim can ever query never misses its window. Doubled as a safety
-// margin against dropped frames / a momentarily large dt.
-const REQUIRED_HISTORY_DURATION = (MAX_SUPPORTED_DISTANCE / MIN_PLAUSIBLE_SPEED_OF_SOUND) * 2; // ~0.133 s
+// The buffer must cover at least MAX_SUPPORTED_DISTANCE / c_min seconds of MODEL time so phaseAtTime()'s
+// retarded-distance lookup for the farthest point this sim can ever query never misses its window (doubled
+// as a safety margin against dropped frames / a momentarily large dt) - AND (V3 mid-ramp-speed-switch fix)
+// at least RAMP_TIME seconds of MODEL time so sampleAtRetardedDistance()'s exact real-time-since-arrival
+// lookup never misses ITS window either: a point can still be mid-ramp for up to RAMP_TIME REAL seconds
+// after arrival, and at normal speed (timeScale=1) that consumes up to RAMP_TIME seconds of MODEL time too
+// (model time = real time there, the worst case across every speed since timeScale<=1 always) - if the
+// buffer trimmed a point's arrival entry before its ramp could finish, the lookup would silently fall back
+// to a stale (too-late) unscaledElapsedTime entry, UNDER-estimating real elapsed time and re-introducing a
+// discontinuity right at the trim boundary - exactly the bug this fix exists to remove. Taking the max of
+// the two independent requirements (not their sum - each only needs to be satisfied on its own), then
+// doubling again for safety margin, comfortably covers both.
+const REQUIRED_HISTORY_DURATION = Math.max((MAX_SUPPORTED_DISTANCE / MIN_PLAUSIBLE_SPEED_OF_SOUND) * 2, RAMP_TIME * 2); // ~0.5 s (RAMP_TIME*2 dominates over the ~0.133s distance-based term)
 
 // ---- Pure physics helpers (exported for unit testing) ----
 
@@ -307,7 +404,11 @@ export type WaveSample = {
   pressure: number; // p', Pa
 };
 
-type PhaseSample = { time: number; phase: number };
+// V3 fix: now a TRIPLE, not a pair - unscaledElapsedTime is recorded alongside phase at every push() so
+// sampleAtRetardedDistance()'s amplitude ramp can look up the EXACT real (unscaled) time that was in effect
+// at any past model time, not just an after-the-fact approximation - see the class doc's PLAYBACK SPEED /
+// RAMP-TIME INDEPENDENCE paragraph and interpolateHistoryValue() below.
+type PhaseSample = { time: number; phase: number; unscaledElapsedTime: number };
 
 export class SoundWavesModel {
   // ---- User-settable Properties ----
@@ -321,14 +422,11 @@ export class SoundWavesModel {
   public readonly propagationModeProperty: StringUnionProperty<PropagationMode>;
   public readonly isPlayingProperty: BooleanProperty;
 
-  // Physics-only stand-in for scenery-phet's TimeSpeed. `scenery-phet` is a VIEW module (see the
-  // scenerystack skill's architecture.md module-responsibility table) - importing `TimeSpeed` from it
-  // here would violate this project's model/view separation rule, and in practice also breaks under
-  // Vitest's Node environment (the scenery-phet barrel eagerly constructs `new Image()` for asset
-  // preloading, which doesn't exist outside a browser). Instead this model exposes a plain, physics-only
-  // isSlowMotionProperty; the view owns the actual EnumerationProperty<TimeSpeed> for TimeControlNode and
-  // syncs it into this Property one-way. Exactly mirrors StandingWavesModel's isSlowMotionProperty.
-  public readonly isSlowMotionProperty: BooleanProperty;
+  // 3-way physics playback speed - see PlaybackSpeed's own doc comment above for why this is a plain,
+  // physics-only StringUnionProperty (same idiom as propagationModeProperty) rather than importing
+  // scenery-phet's TimeSpeed into model code, and why (unlike the OLD isSlowMotionProperty this replaces)
+  // the view now binds to it DIRECTLY with no bridging Property needed.
+  public readonly playbackSpeedProperty: StringUnionProperty<PlaybackSpeed>;
 
   // Backing range Property for amplitudeProperty, kept in sync with frequencyProperty AND
   // speedOfSoundProperty (see NumberProperty's `range?: Range | Property<Range>` option) so the
@@ -362,11 +460,49 @@ export class SoundWavesModel {
 
   /** Model's own clock (s), advanced only while playing - doubles as "time since driving started"
    * since (unlike Standing Waves) there is no separate driving on/off toggle here; the speaker is
-   * always on, so driving started at model-time 0 by construction. */
+   * always on, so driving started at model-time 0 by construction. SCALED by playbackSpeedProperty's
+   * timeScale every step() (see step() below) - this is real simulated/model time, NOT wall-clock time. */
   private simulationTime = 0;
 
-  /** Short ring-buffer history of (time, phase) pairs, spanning at least REQUIRED_HISTORY_DURATION,
-   * used to interpolate theta_source at an arbitrary point's retarded time. */
+  /** WALL-CLOCK (real, UNSCALED) elapsed time since the sim started or was last reset - incremented by
+   * the raw (clamped) dt passed to step(), NEVER by scaledDt/timeScale, so it advances at real-time speed
+   * regardless of playbackSpeedProperty. Used by sampleAtRetardedDistance()'s amplitude-ramp calculation as
+   * the CURRENT ("now") side of an EXACT real-elapsed-time-since-arrival lookup - the "at arrival" side
+   * comes from phaseHistory's own recorded unscaledElapsedTime values (see that field's doc comment) - a
+   * deliberate display-smoothing detail, not real acoustic physics, so it is correct for this one piece of
+   * state to ignore timeScale entirely (see the class doc's PLAYBACK SPEED / RAMP-TIME INDEPENDENCE
+   * paragraph). Never read by any of the actual wave-physics formulas (sourcePhase/simulationTime/
+   * phaseHistory's phase field only). */
+  private unscaledElapsedTime = 0;
+
+  /** Short ring-buffer history of (time, phase, unscaledElapsedTime) triples, spanning at least
+   * REQUIRED_HISTORY_DURATION of MODEL time, used to interpolate theta_source (phaseAtTime) at an arbitrary
+   * point's retarded time, AND (V3 fix) to interpolate the EXACT unscaledElapsedTime that was in effect at
+   * an arbitrary past model time (sampleAtRetardedDistance()'s amplitude-ramp calculation) - both via the
+   * SAME interpolateHistoryValue() mechanism (and the same lowerBoundIndex() binary search), differing only
+   * in which PhaseSample field they read. See REQUIRED_HISTORY_DURATION's own comment for why the buffer
+   * must be sized to satisfy BOTH lookups' windows, not just the phase lookup's.
+   *
+   * SIZE, at extreme slow-down (V3 fix): REQUIRED_HISTORY_DURATION is a fixed amount of MODEL time, but
+   * push() happens once per REAL frame regardless of playbackSpeedProperty - at ultraSlow (timeScale=
+   * 0.001), covering that much model time takes ~1000x more real frames/entries than at Normal speed
+   * (thousands of entries in steady state, since trimHistory() only evicts entries once the buffer's
+   * OLDEST entry's MODEL time falls behind the required window, which itself takes ~1000x longer to happen
+   * in frame-count terms at ultraSlow). This is NOT "unbounded" growth (trimHistory's model-time-window
+   * eviction still caps it at a large-but-finite size), but a NAIVE per-lookup linear scan over an array
+   * that size, repeated once per sample point per frame (hundreds of sample points across
+   * ParticleFieldNode/PressureFieldNode/PressureGraphNode/CompressionTrackerNode), would be a genuine
+   * per-frame perf cliff. FIX CHOSEN: keep the buffer's existing time-windowed sizing (still fully correct
+   * at every speed, unlike capping entry COUNT independent of timeScale would be - see below), and instead
+   * replace the linear scan with an O(log n) BINARY SEARCH (lowerBoundIndex() below) - the array is already
+   * strictly time-ordered by construction (each push() appends a strictly increasing simulationTime), so
+   * this is a minimal, localized change with no correctness tradeoff. This was chosen over capping the
+   * array's raw entry COUNT (the spec's alternative option) because a count-based cap would, at ultraSlow,
+   * cover LESS than REQUIRED_HISTORY_DURATION of model time - undercutting exactly the far-field queries
+   * (up to MAX_SUPPORTED_DISTANCE) this buffer exists to serve correctly, the first time a student leaves
+   * Ultra Slow running long enough for the wavefront to actually reach one. Binary search avoids that
+   * tradeoff entirely: correctness never degrades at any speed, only the (now O(log n), not O(n)) lookup
+   * cost is paid for a larger buffer. */
   private readonly phaseHistory: PhaseSample[] = [];
 
   public constructor() {
@@ -391,7 +527,9 @@ export class SoundWavesModel {
     });
 
     this.isPlayingProperty = new BooleanProperty(true);
-    this.isSlowMotionProperty = new BooleanProperty(false);
+    this.playbackSpeedProperty = new StringUnionProperty<PlaybackSpeed>("normal", {
+      validValues: ["normal", "slow", "ultraSlow"],
+    });
 
     // Keep the amplitude range tracking frequency and speed of sound live. When the bound shrinks,
     // clamp the current value into the (still-valid, about-to-shrink) old range FIRST - by setting it
@@ -430,7 +568,7 @@ export class SoundWavesModel {
     this.displacements = new Float64Array(pointCount);
     this.pressures = new Float64Array(pointCount);
 
-    this.phaseHistory.push({ time: 0, phase: 0 });
+    this.phaseHistory.push({ time: 0, phase: 0, unscaledElapsedTime: 0 });
   }
 
   private static computeAmplitudeRange(speedOfSound: number, frequency: number): Range {
@@ -480,14 +618,42 @@ export class SoundWavesModel {
   private sampleAtRetardedDistance(retardedTime: number, amplitudeAtThisDistance: number): WaveSample {
     if (retardedTime <= 0) {
       // The wavefront hasn't reached this distance yet - simply at rest. This is the physical wavefront
-      // falling naturally out of the retarded-time lookup, not a special case.
+      // falling naturally out of the retarded-time lookup, not a special case. NOTE: this gating check
+      // stays on the real (scaled) retardedTime/simulationTime - only the RAMP below (once we're past this
+      // check) uses the separate unscaled clock. A point never appears active before the wavefront has
+      // physically reached it, at any playback speed.
       return { displacement: 0, velocity: 0, pressure: 0 };
     }
 
     const speedOfSound = this.speedOfSoundProperty.value;
     const retardedPhase = this.phaseAtTime(retardedTime);
-    const ramp = rampFactor(retardedTime, RAMP_TIME);
     const omega = angularFrequency(this.frequencyProperty.value);
+
+    // RAMP (V3 fix, re-fixed for mid-ramp speed switches - see the class doc's PLAYBACK SPEED / RAMP-TIME
+    // INDEPENDENCE paragraph for the full history of this fix): rampFactor() must be fed REAL (unscaled)
+    // elapsed time since THIS point's own wavefront arrival, not the scaled model-time retardedTime itself.
+    //
+    // retardedTime is elapsed MODEL time since arrival (by definition: the wavefront arrives at absolute
+    // model-time distance/c, i.e. when retardedTime crosses 0, so retardedTime = simulationTime - distance/c
+    // = (now) - (arrival) IS elapsed model-time-since-arrival, and it is used exactly this way as an
+    // absolute model-time coordinate into phaseHistory by phaseAtTime() above). this.simulationTime -
+    // retardedTime is therefore the ABSOLUTE model time at which THIS point's retardedTime itself crossed 0
+    // - i.e. the model time of its wavefront's arrival. Looking up phaseHistory's recorded
+    // unscaledElapsedTime AT that model time (via the same interpolateHistoryValue() lookup phaseAtTime()
+    // uses for phase, just reading a different field) gives the EXACT wall-clock time at which this point's
+    // ramp began; subtracting that from the CURRENT unscaledElapsedTime gives the point's EXACT real-time-
+    // since-arrival, regardless of any playbackSpeedProperty changes that happened after arrival - unlike
+    // the old retardedTime/(CURRENT timeScale) approximation this replaces, which was only exact if the
+    // speed never changed since arrival, and otherwise produced a one-frame amplitude discontinuity in BOTH
+    // directions right at a mid-ramp speed switch (the "sanity ceiling" that used to clamp this did not
+    // actually guard the fast->slow direction, despite its old doc comment's claim). No clamp/ceiling is
+    // needed any more: this lookup is exact, not an approximation, by construction (arrival's
+    // unscaledElapsedTime can never exceed the current one, since both are read from the same monotonically
+    // non-decreasing accumulator).
+    const arrivalModelTime = this.simulationTime - retardedTime;
+    const unscaledElapsedTimeAtArrival = this.interpolateHistoryValue(arrivalModelTime, (sample) => sample.unscaledElapsedTime);
+    const realTimeSinceArrival = this.unscaledElapsedTime - unscaledElapsedTimeAtArrival;
+    const ramp = rampFactor(realTimeSinceArrival, RAMP_TIME);
 
     const displacement = displacementAtRetardedPhase(amplitudeAtThisDistance, ramp, retardedPhase);
     const velocity = velocityAtRetardedPhase(amplitudeAtThisDistance, ramp, retardedPhase, omega);
@@ -496,26 +662,67 @@ export class SoundWavesModel {
     return { displacement, velocity, pressure };
   }
 
-  /** Linearly interpolates theta_source at time t from the phase history buffer. */
-  private phaseAtTime(t: number): number {
+  /** Interpolates an arbitrary recorded PhaseSample field at (absolute, model-time) t from the phase
+   * history buffer. Uses an O(log n) BINARY SEARCH (lowerBoundIndex(), below) rather than a linear scan -
+   * see phaseHistory's own doc comment for why this matters once the buffer grows large at slow playback
+   * speeds: this is what keeps the per-frame cost from scaling with buffer size, however large ultraSlow's
+   * steady-state buffer gets. Shared by phaseAtTime() (interpolates .phase) and
+   * sampleAtRetardedDistance()'s exact ramp lookup (interpolates .unscaledElapsedTime, V3 fix) - both go
+   * through the exact same bracket-and-interpolate logic, so they can never drift out of sync in HOW a
+   * historical time is resolved, only in WHICH field they read. */
+  private interpolateHistoryValue(t: number, valueOf: (sample: PhaseSample) => number): number {
     const history = this.phaseHistory;
     const first = history[0];
     if (t <= first.time) {
-      return first.phase; // defensive clamp - shouldn't normally be reached, see REQUIRED_HISTORY_DURATION
+      return valueOf(first); // defensive clamp - shouldn't normally be reached, see REQUIRED_HISTORY_DURATION
     }
-    for (let i = 1; i < history.length; i++) {
-      const sample = history[i];
-      if (t <= sample.time) {
-        const previous = history[i - 1];
-        const span = sample.time - previous.time;
-        const fraction = span > 0 ? (t - previous.time) / span : 0;
-        return previous.phase + fraction * (sample.phase - previous.phase);
+
+    const index = this.lowerBoundIndex(t); // first entry with entry.time >= t
+    if (index >= history.length) {
+      // t is beyond the most recent recorded sample. Callers only ever query times <= simulationTime, and
+      // the most recent history entry's time IS simulationTime, so this is unreachable in normal operation -
+      // kept only as a defensive fallback.
+      return valueOf(history[history.length - 1]);
+    }
+
+    const sample = history[index];
+    if (index === 0) {
+      // t <= first.time would already have returned above, so index===0 here only if t exactly equals
+      // first.time due to floating-point edge cases - either way, no earlier bracket exists to interpolate
+      // from.
+      return valueOf(sample);
+    }
+    const previous = history[index - 1];
+    const span = sample.time - previous.time;
+    const fraction = span > 0 ? (t - previous.time) / span : 0;
+    return valueOf(previous) + fraction * (valueOf(sample) - valueOf(previous));
+  }
+
+  /** Interpolates theta_source at (absolute, model-time) t from the phase history buffer - see
+   * interpolateHistoryValue() above, which this delegates to. */
+  private phaseAtTime(t: number): number {
+    return this.interpolateHistoryValue(t, (sample) => sample.phase);
+  }
+
+  /** Binary search for the index of the first phaseHistory entry with entry.time >= t (the standard
+   * "lower bound" search). Valid because phaseHistory is strictly time-ordered by construction - each
+   * step() appends a single new entry with a strictly larger simulationTime than the previous one, and
+   * trimHistory() only ever removes entries from the front. Returns history.length if every entry's time
+   * is < t. O(log n), replacing the OLD O(n) linear scan - see phaseHistory's own doc comment for why this
+   * is required once the buffer grows large at slow playback speeds. */
+  private lowerBoundIndex(t: number): number {
+    const history = this.phaseHistory;
+    let low = 0;
+    let high = history.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (history[mid].time < t) {
+        low = mid + 1;
+      } else {
+        high = mid;
       }
     }
-    // t is beyond the most recent recorded sample. Callers only ever query retarded times <=
-    // simulationTime, and the most recent history entry's time IS simulationTime, so this is
-    // unreachable in normal operation - kept only as a defensive fallback.
-    return history[history.length - 1].phase;
+    return low;
   }
 
   /** Drops history entries older than needed to cover REQUIRED_HISTORY_DURATION, keeping at least 2
@@ -527,10 +734,11 @@ export class SoundWavesModel {
     }
   }
 
-  /** Feeds PressureGraphNode - kept as a PLANE-wave-only cache (unchanged from before spherical mode
-   * was added), same as samplePositions' own doc comment says: this always reflects the plane wave
-   * over [0, DOMAIN_LENGTH], regardless of propagationModeProperty. The view is responsible for only
-   * showing PressureGraphNode while in plane mode (see SoundWavesScreenView.ts). */
+  /** A PLANE-wave-only cache over the fixed [0, DOMAIN_LENGTH] range, unaffected by propagationModeProperty
+   * or view-owned zoom. NO LONGER read by PressureGraphNode.ts (which now samples model.sampleAt(x) directly
+   * at its own zoom-aware positions - see that file's own doc comment for why the fixed-Local-scale version
+   * of this cache stopped being correct once zoom was added to the pressure graph) - retained only for
+   * SoundWavesModel.test.ts's existing coverage of samplePositions/displacements/pressures. */
   private recomputeSamples(): void {
     for (let i = 0; i < this.samplePositions.length; i++) {
       const sample = this.sampleAt(this.samplePositions[i]);
@@ -549,18 +757,46 @@ export class SoundWavesModel {
       return;
     }
 
-    const timeScale = this.isSlowMotionProperty.value ? SLOW_MOTION_TIME_SCALE : 1;
-    const scaledDt = Math.min(dt, MAX_STEP_DT) * timeScale;
-    if (!(scaledDt > 0)) {
+    this.advance(dt);
+  }
+
+  /**
+   * Advances by exactly one nominal frame (MANUAL_STEP_DT), bypassing the isPlayingProperty gate -
+   * for the "step forward" button, which is only enabled while paused (see PlayPauseStepButtonGroup's
+   * default stepButtonEnabledProperty) and needs to advance a single frame on demand regardless.
+   */
+  public stepOnce(): void {
+    this.advance(MANUAL_STEP_DT);
+  }
+
+  /** Shared advancement logic between the gated per-frame step() and the ungated manual stepOnce(). */
+  private advance(dt: number): void {
+    // Clamp FIRST (defensive against a stalled/backgrounded tab, see MAX_STEP_DT), then derive both the
+    // scaled (physics) dt and the unscaled (wall-clock) dt from the SAME clamped value - so a single
+    // shared clock genuinely drives sourcePhase, simulationTime, AND unscaledElapsedTime; timeScale is the
+    // ONLY thing that ever distinguishes "scaled" from "unscaled" time, never a second, independently
+    // clamped/derived dt.
+    const clampedDt = Math.min(dt, MAX_STEP_DT);
+    if (!(clampedDt > 0)) {
       return;
     }
 
+    const timeScale = TIME_SCALE_BY_SPEED[this.playbackSpeedProperty.value];
+    const scaledDt = clampedDt * timeScale;
+
+    // UNSCALED - see unscaledElapsedTime's own field comment. Deliberately uses clampedDt directly, never
+    // scaledDt, so this always advances at real wall-clock speed regardless of playbackSpeedProperty.
+    this.unscaledElapsedTime += clampedDt;
+
     // Integrated over the frame using the CURRENT frequency value - an integral, not theta = omega*t
-    // from a fixed start, so a mid-simulation frequency change is handled correctly (see class doc).
+    // from a fixed start, so a mid-simulation frequency change is handled correctly (see class doc). Both
+    // sourcePhase and simulationTime use the SAME scaledDt, so oscillation rate and propagation speed stay
+    // locked together at every playback speed (see the class doc's PLAYBACK SPEED / RAMP-TIME
+    // INDEPENDENCE paragraph).
     this.sourcePhase += angularFrequency(this.frequencyProperty.value) * scaledDt;
     this.simulationTime += scaledDt;
 
-    this.phaseHistory.push({ time: this.simulationTime, phase: this.sourcePhase });
+    this.phaseHistory.push({ time: this.simulationTime, phase: this.sourcePhase, unscaledElapsedTime: this.unscaledElapsedTime });
     this.trimHistory();
 
     this.recomputeSamples();
@@ -572,15 +808,16 @@ export class SoundWavesModel {
     this.sphericalAmplitudeProperty.reset();
     this.propagationModeProperty.reset();
     this.isPlayingProperty.reset();
-    this.isSlowMotionProperty.reset();
+    this.playbackSpeedProperty.reset();
 
     // Shared accumulator/history/clock state - resetting it once here correctly restores BOTH modes
     // (sampleAt and sampleAtRadius both read the same sourcePhase/simulationTime/phaseHistory), not just
     // whichever mode happens to be active.
     this.sourcePhase = 0;
     this.simulationTime = 0;
+    this.unscaledElapsedTime = 0;
     this.phaseHistory.length = 0;
-    this.phaseHistory.push({ time: 0, phase: 0 });
+    this.phaseHistory.push({ time: 0, phase: 0, unscaledElapsedTime: 0 });
 
     this.displacements.fill(0);
     this.pressures.fill(0);
