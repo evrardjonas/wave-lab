@@ -11,7 +11,8 @@
     "build": "npx tsc && npx vite build",
     "test": "npx vitest run",
     "test:watch": "npx vitest",
-    "publish:standing-waves": "node scripts/publish-sim.mjs standing-waves"
+    "publish:standing-waves": "node scripts/publish-sim.mjs standing-waves",
+    "publish:sound-waves": "node scripts/publish-sim.mjs sound-waves"
   },
   "dependencies": {
     "scenerystack": "^3.0.0"
