@@ -1,11 +1,19 @@
-import type { BooleanProperty, TReadOnlyProperty } from "scenerystack/axon";
+import type { BooleanProperty } from "scenerystack/axon";
 import { DerivedProperty } from "scenerystack/axon";
 import { Range } from "scenerystack/dot";
 import { Line, RichText, Text, VBox } from "scenerystack/scenery";
 import { Checkbox, Panel } from "scenerystack/sun";
 import { NumberControl, NumberDisplay, PhetFont, TimeControlNode } from "scenerystack/scenery-phet";
-import { AMPLITUDE_SAFETY_FRACTION, DOMAIN_LENGTH, FREQUENCY_RANGE, SoundWavesModel, strictAmplitudeBound, wavelength } from "../model/SoundWavesModel.js";
-import type { RepresentationMode } from "./ParticleFieldNode.js";
+import {
+  AMPLITUDE_SAFETY_FRACTION,
+  DOMAIN_LENGTH,
+  FREQUENCY_RANGE,
+  SPHERICAL_SOURCE_RADIUS,
+  SoundWavesModel,
+  strictAmplitudeBound,
+  strictRadialAmplitudeBound,
+  wavelength,
+} from "../model/SoundWavesModel.js";
 import { PlaybackSpeedControl } from "./PlaybackSpeedControl.js";
 
 // This file is VIEW code (imports scenery/sun/scenery-phet freely) - all physics lives in the model.
@@ -42,27 +50,36 @@ function widestPossibleAmplitudeRange(speedOfSound: number): Range {
   return new Range(0, AMPLITUDE_SAFETY_FRACTION * strictAmplitudeBound(widestWavelength));
 }
 
+// Spherical-mode counterpart to widestPossibleAmplitudeRange above - same reasoning (fixed outer slider
+// track sized from FREQUENCY_RANGE.min, the frequency that gives the widest cap), but through
+// strictRadialAmplitudeBound (the stricter, radius-aware bound spherical mode must use - see that
+// function's doc comment in SoundWavesModel.ts) rather than strictAmplitudeBound.
+function widestPossibleSphericalAmplitudeRange(speedOfSound: number): Range {
+  const widestWavelength = wavelength(speedOfSound, FREQUENCY_RANGE.min);
+  return new Range(0, AMPLITUDE_SAFETY_FRACTION * strictRadialAmplitudeBound(widestWavelength, SPHERICAL_SOURCE_RADIUS));
+}
+
 export type ControlPanelOptions = {
   showPressureGraphProperty: BooleanProperty;
   showRulerProperty: BooleanProperty;
-  showPressureFieldProperty: BooleanProperty;
   showCompressionTrackerProperty: BooleanProperty;
-  representationModeProperty: TReadOnlyProperty<RepresentationMode>;
+  showWavefrontProperty: BooleanProperty;
+  colorEnabledProperty: BooleanProperty;
 };
 
 /**
  * All simulation controls, organized per the reviewed interaction design:
  *  - Prominent tier: Frequency/Amplitude NumberControls (with an amplitude-exaggeration disclosure
- *    caption), TimeControlNode (play/pause/step only - see PlaybackSpeedControl below), and this sim's
- *    own PlaybackSpeedControl (Normal/Slow/Ultra Slow - V3 addition, replaces TimeControlNode's built-in,
- *    closed-enum speed radio group).
+ *    caption and a "Color" checkbox, see colorCheckbox below), TimeControlNode (play/pause/step only -
+ *    see PlaybackSpeedControl below), and this sim's own PlaybackSpeedControl (Normal/Slow/Ultra Slow -
+ *    replaces TimeControlNode's built-in, closed-enum speed radio group).
  *  - An ALWAYS-VISIBLE passive readout strip (Frequency, Wavelength, Speed of Sound) - unlike
  *    Standing Waves' opt-in wave-info panel, these are this sim's centerpiece per the pedagogy
  *    review, so they are never hidden behind a checkbox.
- *  - Opt-in checkboxes (default off): "Show pressure graph", "Show ruler", "Show pressure field", and
- *    "Show compression tracker", each with a short caption. None has any color-coding/checkmark/star/
- *    sound tied to "correctness" - these are exploratory display toggles and a bare measurement tool,
- *    with no feedback on whether a measurement or observation was "right".
+ *  - Opt-in checkboxes (default off): "Show pressure graph", "Show ruler", "Show compression tracker",
+ *    and "Show wavefront", each with a short caption. None has any color-coding/checkmark/star/sound
+ *    tied to "correctness" - these are exploratory display toggles and a bare measurement tool, with no
+ *    feedback on whether a measurement or observation was "right".
  */
 export class ControlPanel extends Panel {
   public constructor(model: SoundWavesModel, options: ControlPanelOptions) {
@@ -74,19 +91,54 @@ export class ControlPanel extends Panel {
       accessibleName: "Frequency",
     });
 
+    // Two NumberControls, only one visible at a time depending on propagationModeProperty - PLANE mode's
+    // amplitudeProperty and SPHERICAL mode's sphericalAmplitudeProperty have different amplitude-cap
+    // formulas (strictAmplitudeBound vs. strictRadialAmplitudeBound, see SoundWavesModel.ts) and are
+    // independently adjustable/rememberable, so a single NumberControl can't just rebind its Property when
+    // the mode changes - NumberControl's numberProperty is fixed at construction. Presented to the user as
+    // a single "Amplitude" control (same accessibleName, same position in the panel) that happens to follow
+    // whichever mode is active, mirroring how loudspeakerNode/pointSourceNode share one visual slot in
+    // SoundWavesScreenView.ts. BUG FIX: previously this panel exposed only the plane-wave amplitudeControl
+    // regardless of propagationModeProperty, so there was no way to change amplitude at all while in
+    // Spherical mode.
+    const isPlaneModeProperty = new DerivedProperty([model.propagationModeProperty], (mode) => mode === "plane");
+    const isSphericalModeProperty = new DerivedProperty([model.propagationModeProperty], (mode) => mode === "spherical");
+
     const amplitudeControl = new NumberControl("Amplitude", model.amplitudeProperty, widestPossibleAmplitudeRange(model.speedOfSoundProperty.value), {
       delta: 0.001,
       numberDisplayOptions: { decimalPlaces: 3, valuePattern: "{{value}} m" },
       enabledRangeProperty: model.amplitudeProperty.rangeProperty,
       titleNodeOptions: { font: PROMINENT_LABEL_FONT },
       layoutFunction: NumberControl.createLayoutFunction4({ verticalSpacing: 4 }),
+      visibleProperty: isPlaneModeProperty,
       accessibleName: "Amplitude",
       accessibleHelpText: "The maximum allowed amplitude shrinks automatically as frequency increases.",
+    });
+    const sphericalAmplitudeControl = new NumberControl("Amplitude", model.sphericalAmplitudeProperty, widestPossibleSphericalAmplitudeRange(model.speedOfSoundProperty.value), {
+      delta: 0.001,
+      numberDisplayOptions: { decimalPlaces: 3, valuePattern: "{{value}} m" },
+      enabledRangeProperty: model.sphericalAmplitudeProperty.rangeProperty,
+      titleNodeOptions: { font: PROMINENT_LABEL_FONT },
+      layoutFunction: NumberControl.createLayoutFunction4({ verticalSpacing: 4 }),
+      visibleProperty: isSphericalModeProperty,
+      accessibleName: "Amplitude",
+      accessibleHelpText: "The amplitude at the source; the maximum allowed value shrinks automatically as frequency increases.",
     });
     const amplitudeCaption = new RichText("Particle motion is shown much larger than real sound waves, so it's visible.", {
       font: CAPTION_FONT,
       fill: "#707070",
       lineWrap: PANEL_WIDTH - 20,
+    });
+
+    // "Color" - the one control for the bolder, discrete-tier rendering (see ParticleFieldNode.ts's
+    // "Color mode" doc comment and PressureFieldNode.ts's redrawColor()). Placed next to Amplitude, not
+    // in the opt-in overlays section below, per the reviewed interaction design: it changes how the
+    // WHOLE field (particles + background shading) is drawn, not one additional overlay among others.
+    // Replaces the old, separate "Show pressure field" checkbox - one mechanism for "make this more
+    // visually prominent", not two overlapping ones.
+    const colorCheckbox = new Checkbox(options.colorEnabledProperty, new Text("Color", { font: SECONDARY_LABEL_FONT }), {
+      accessibleName: "Color",
+      accessibleHelpText: "Shades the particles and the background more boldly, in discrete bands by compression (red) and rarefaction (blue), to make the wave easier to see at a glance.",
     });
 
     // V3: this sim's own 3-way PlaybackSpeedControl (Normal/Slow/Ultra Slow) replaces TimeControlNode's
@@ -114,7 +166,7 @@ export class ControlPanel extends Panel {
       align: "left",
       children: [
         frequencyControl,
-        new VBox({ spacing: 2, align: "left", children: [amplitudeControl, amplitudeCaption] }),
+        new VBox({ spacing: 2, align: "left", children: [amplitudeControl, sphericalAmplitudeControl, amplitudeCaption, colorCheckbox] }),
         // Kept visually grouped together (play/pause/step/reset + speed), per the reviewed interaction
         // design - not split across unrelated sections of the panel.
         new VBox({ spacing: 8, align: "left", children: [timeControlNode, playbackSpeedControl] }),
@@ -160,40 +212,13 @@ export class ControlPanel extends Panel {
 
     const rulerCheckbox = new Checkbox(options.showRulerProperty, new Text("Show ruler", { font: SECONDARY_LABEL_FONT }), {
       accessibleName: "Show ruler",
-      accessibleHelpText: "Shows a draggable ruler for measuring distances, such as the spacing between two compressions. Pause the simulation first for an accurate reading. Only available at Local zoom.",
+      accessibleHelpText: "Shows a draggable ruler for measuring distances, such as the spacing between two compressions. Pause the simulation first for an accurate reading.",
     });
     const rulerCaption = new RichText("Pause, then drag the ruler to measure the distance between two compressions.", {
       font: CAPTION_FONT,
       fill: "#707070",
       lineWrap: PANEL_WIDTH - 20,
     });
-
-    // V3: this checkbox's opt-in "prominent" shading tier becomes a no-op once Pedagogical (labeled
-    // "Simplified" on RepresentationModeControl - see that file's V3 label-wording fix) mode is already
-    // maximally bold (see PressureFieldNode.ts's Pedagogical-tier redraw) - DISABLED (not hidden, which
-    // would shift layout) while representationModeProperty is 'pedagogical', with caption/help text
-    // updated so it reads as intentional rather than broken. Re-enabled normally in Real mode. User-facing
-    // strings below say "Simplified mode" (matching the button's visible label), not "Pedagogical mode".
-    const pressureFieldEnabledProperty = new DerivedProperty([options.representationModeProperty], (mode) => mode !== "pedagogical");
-    const pressureFieldCheckbox = new Checkbox(options.showPressureFieldProperty, new Text("Show pressure field", { font: SECONDARY_LABEL_FONT }), {
-      enabledProperty: pressureFieldEnabledProperty,
-      accessibleName: "Show pressure field",
-      accessibleHelpText: new DerivedProperty([options.representationModeProperty], (mode) =>
-        mode === "pedagogical"
-          ? "Shades the particle field itself red where compressed and blue where rarefied. Already shown in Simplified mode."
-          : "Shades the particle field itself red where compressed and blue where rarefied, in addition to the always-on faint background shading.",
-      ),
-    });
-    const pressureFieldCaption = new RichText(
-      new DerivedProperty([options.representationModeProperty], (mode) =>
-        mode === "pedagogical" ? "Shades the field itself by compression (red) and rarefaction (blue). (Already shown in Simplified mode.)" : "Shades the field itself by compression (red) and rarefaction (blue).",
-      ),
-      {
-        font: CAPTION_FONT,
-        fill: "#707070",
-        lineWrap: PANEL_WIDTH - 20,
-      },
-    );
 
     const compressionTrackerCheckbox = new Checkbox(options.showCompressionTrackerProperty, new Text("Show compression tracker", { font: SECONDARY_LABEL_FONT }), {
       accessibleName: "Show compression tracker",
@@ -209,14 +234,27 @@ export class ControlPanel extends Panel {
       },
     );
 
+    // Distinct from compressionTrackerCheckbox above: this marks the SINGLE leading edge of the
+    // disturbance, not every periodic compression - see WavefrontMarkerNode.ts's own class doc for why
+    // this is a separate component rather than a mode of CompressionTrackerNode.
+    const wavefrontCheckbox = new Checkbox(options.showWavefrontProperty, new Text("Show wavefront", { font: SECONDARY_LABEL_FONT }), {
+      accessibleName: "Show wavefront",
+      accessibleHelpText: "Marks how far the wave has traveled from the source so far - a single marker at the leading edge, not the repeating compressions the compression tracker marks.",
+    });
+    const wavefrontCaption = new RichText("Marks the leading edge of the disturbance - how far the wave has traveled so far.", {
+      font: CAPTION_FONT,
+      fill: "#707070",
+      lineWrap: PANEL_WIDTH - 20,
+    });
+
     const overlaysContent = new VBox({
       spacing: 8,
       align: "left",
       children: [
         pressureGraphCheckbox,
         new VBox({ spacing: 2, align: "left", children: [rulerCheckbox, rulerCaption] }),
-        new VBox({ spacing: 2, align: "left", children: [pressureFieldCheckbox, pressureFieldCaption] }),
         new VBox({ spacing: 2, align: "left", children: [compressionTrackerCheckbox, compressionTrackerCaption] }),
+        new VBox({ spacing: 2, align: "left", children: [wavefrontCheckbox, wavefrontCaption] }),
       ],
     });
 

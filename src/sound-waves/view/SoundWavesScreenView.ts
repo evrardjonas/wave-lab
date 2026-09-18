@@ -4,16 +4,16 @@ import { DragListener, KeyboardDragListener } from "scenerystack/scenery";
 import { ScreenView, ScreenViewOptions } from "scenerystack/sim";
 import { InfoButton, ResetAllButton, RulerNode } from "scenerystack/scenery-phet";
 import { SoundWavesModel } from "../model/SoundWavesModel.js";
-import { ParticleFieldNode, pixelsPerMeterForZoom, type RepresentationMode, type ViewZoom } from "./ParticleFieldNode.js";
+import { ParticleFieldNode, pixelsPerMeterForZoom, type ViewZoom } from "./ParticleFieldNode.js";
 import { LoudspeakerNode, PointSourceNode } from "./LoudspeakerNode.js";
 import { PressureGraphNode } from "./PressureGraphNode.js";
 import { PressureFieldNode } from "./PressureFieldNode.js";
 import { CompressionTrackerNode } from "./CompressionTrackerNode.js";
+import { WavefrontMarkerNode } from "./WavefrontMarkerNode.js";
 import { ControlPanel } from "./ControlPanel.js";
 import { HowThisWorksDialog } from "./HowThisWorksDialog.js";
 import { ZoomControl } from "./ZoomControl.js";
 import { PropagationModeControl } from "./PropagationModeControl.js";
-import { RepresentationModeControl } from "./RepresentationModeControl.js";
 
 // View-space layout constants. x=0 (the loudspeaker) sits at DIAGRAM_ORIGIN_X in PLANE mode; the
 // particle field's vertical center sits at DIAGRAM_ORIGIN_Y. SPHERICAL_ORIGIN_X/Y is the SEPARATE point
@@ -96,15 +96,28 @@ const SPHERICAL_ORIGIN_X = 350;
 const SPHERICAL_ORIGIN_Y = 385;
 const TOP_CHROME_ROW_GAP = 6; // px, vertical gap between the two top chrome rows - see the arithmetic above
 
+// RulerNode's rulerWidth/majorTickWidth/labels are plain constructor parameters, not reactive Properties
+// (see the installed source - no way to re-calibrate one RulerNode instance after construction), so
+// Local and Field zoom each get their OWN RulerNode instance below (localRulerNode/fieldRulerNode),
+// toggled by visibility exactly like the two Amplitude NumberControls above - not a single ruler hidden
+// outright at Field zoom, which is what this used to do (a real measuring tool should work at whichever
+// zoom the student is looking at, not just one).
+
 const RULER_WIDTH = pixelsPerMeterForZoom("local"); // px, represents exactly 1 m at Local zoom's scale.
-// The ruler is deliberately calibrated ONLY at Local zoom (see rulerVisibleProperty below, which hides
-// it at Field zoom rather than silently mis-measuring) - 20 cm major ticks (not 10 cm, unlike Standing
-// Waves' ruler) because PIXELS_PER_METER_X is smaller here (150 vs Standing Waves' 320, since this sim's
-// domain is several meters, not ~1-2m), so 10 cm ticks would only be 15px apart - too narrow for
-// RulerNode to fit a tick label plus the "cm" units label (it asserts on construction if there isn't
-// room). 20 cm ticks give 30px of spacing, matching the ~32px that's already proven to work in Standing
-// Waves' ruler.
+// 20 cm major ticks (not 10 cm, unlike Standing Waves' ruler) because PIXELS_PER_METER_X is smaller here
+// (150 vs Standing Waves' 320, since this sim's domain is several meters, not ~1-2m), so 10 cm ticks
+// would only be 15px apart - too narrow for RulerNode to fit a tick label plus the "cm" units label (it
+// asserts on construction if there isn't room). 20 cm ticks give 30px of spacing, matching the ~32px
+// that's already proven to work in Standing Waves' ruler.
 const RULER_MAJOR_TICK_SPACING = RULER_WIDTH / 5; // px, represents 20 cm
+
+// Field zoom's ruler represents a wider physical span in METERS (not cm - Field's 16m-wide domain makes
+// a cm-scale ruler pointless) - 5 m chosen so its on-screen width, at Field's much smaller px/m, is still
+// a reasonably sized, draggable object (5 * 37.5 = 187.5px - wider than the Local ruler's 150px, not
+// narrower, even though Field zoom shows more of the domain per screen pixel).
+const FIELD_RULER_METERS = 5;
+const FIELD_RULER_WIDTH = pixelsPerMeterForZoom("field") * FIELD_RULER_METERS; // px
+const FIELD_RULER_MAJOR_TICK_SPACING = FIELD_RULER_WIDTH / FIELD_RULER_METERS; // px, represents 1 m
 
 // Minimum horizontal gap (px) between ZoomControl's right edge and the ruler's default left edge (QA
 // re-review: the old hardcoded default x left only a "razor-thin at best" gap here - see the ruler's own
@@ -123,17 +136,20 @@ const RESET_ALL_BUTTON_MARGIN = 10;
  *    a time, toggled directly off model.propagationModeProperty below - ParticleFieldNode/
  *    PressureFieldNode/CompressionTrackerNode each handle their own internal mode switch and so need no
  *    external visibility toggle.
- *  - Shared overlays (PressureFieldNode background shading, CompressionTrackerNode markers) that read
- *    from whichever origin/mode is currently active.
+ *  - Shared overlays (PressureFieldNode background shading, CompressionTrackerNode markers,
+ *    WavefrontMarkerNode's single leading-edge marker) that read from whichever origin/mode is
+ *    currently active.
  *  - PressureGraphNode, a PLANE-only precise pressure-vs-x chart - hidden outright in spherical mode
  *    (see pressureGraphVisibleProperty below), since it only ever samples the plane wave (model.sampleAt(x),
  *    never sampleAtRadius(r)). Zoom-aware like ParticleFieldNode/PressureFieldNode (shares this same
  *    viewZoomProperty) - see PressureGraphNode.ts's own class doc for the zoom-alignment bug fix.
- *  - Stage-level chrome, now TWO ROWS (V3 addition of RepresentationModeControl): row 1 groups every
- *    "what am I looking at" concern (InfoButton/HowThisWorksDialog, PropagationModeControl,
- *    RepresentationModeControl); row 2 holds ZoomControl alone, a secondary "how much do I see" concern.
- *    None of these are "simulation controls" in the ControlPanel sense, per the reviewed interaction
- *    design. Also: the draggable ruler (Local-zoom only, see RULER_WIDTH above), and ResetAllButton.
+ *  - Stage-level chrome, TWO ROWS: row 1 groups every "what am I looking at" concern (InfoButton/
+ *    HowThisWorksDialog, PropagationModeControl); row 2 holds ZoomControl alone, a secondary "how much
+ *    do I see" concern. (Row 1 previously also held RepresentationModeControl, and the "Color"/
+ *    wavefront/compression-tracker options below were split differently - see ControlPanel.ts and
+ *    PressureFieldNode.ts/ParticleFieldNode.ts for that reshuffle.) None of these are "simulation
+ *    controls" in the ControlPanel sense, per the reviewed interaction design. Also: the draggable
+ *    ruler (see RULER_WIDTH above), and ResetAllButton.
  *
  * LAYOUT FIX (QA review, and its V3 re-check): an earlier version of this file sized and positioned the
  * spherical field so its circular footprint overflowed the stage bottom by 2px and left only ~4px of
@@ -153,15 +169,16 @@ export class SoundWavesScreenView extends ScreenView {
   private readonly particleFieldNode: ParticleFieldNode;
   private readonly pressureFieldNode: PressureFieldNode;
   private readonly compressionTrackerNode: CompressionTrackerNode;
+  private readonly wavefrontMarkerNode: WavefrontMarkerNode;
   private readonly loudspeakerNode: LoudspeakerNode;
   private readonly pointSourceNode: PointSourceNode;
   private readonly pressureGraphNode: PressureGraphNode;
   private readonly showPressureGraphProperty: BooleanProperty;
   private readonly showRulerProperty: BooleanProperty;
-  private readonly showPressureFieldProperty: BooleanProperty;
   private readonly showCompressionTrackerProperty: BooleanProperty;
+  private readonly showWavefrontProperty: BooleanProperty;
+  private readonly colorEnabledProperty: BooleanProperty;
   private readonly viewZoomProperty: Property<ViewZoom>;
-  private readonly representationModeProperty: Property<RepresentationMode>;
   private readonly rulerPositionProperty: Vector2Property;
 
   public constructor(model: SoundWavesModel, options?: ScreenViewOptions) {
@@ -170,16 +187,19 @@ export class SoundWavesScreenView extends ScreenView {
     // ---- View-only UI state (display options, not physics - deliberately not model Properties) ----
     this.showPressureGraphProperty = new BooleanProperty(false);
     this.showRulerProperty = new BooleanProperty(false);
-    this.showPressureFieldProperty = new BooleanProperty(false);
     this.showCompressionTrackerProperty = new BooleanProperty(false);
+    this.showWavefrontProperty = new BooleanProperty(false);
     // Defaults to "local", which exactly reproduces this sim's original fixed-scale appearance (see
     // ParticleFieldNode.ts's FIELD_PIXEL_WIDTH doc) - so existing plane-wave behavior is unchanged unless
     // a student explicitly switches to "field".
     this.viewZoomProperty = new Property<ViewZoom>("local");
-    // V3 addition: defaults to "real", the sim's original rendering - see RepresentationMode's own doc
-    // comment in ParticleFieldNode.ts for why this is a plain view-only Property (like viewZoomProperty
-    // above), never joined to any geometry-rebuild Multilink in any consumer.
-    this.representationModeProperty = new Property<RepresentationMode>("real");
+    // Defaults to off, the sim's original rendering - see the "Color mode" doc comment in
+    // ParticleFieldNode.ts for why this is a plain view-only Property (like viewZoomProperty above),
+    // never joined to any geometry-rebuild Multilink in any consumer. Bound directly to ControlPanel's
+    // "Color" checkbox - previously this was a 2-option 'real'/'pedagogical' mode Property surfaced via a
+    // separate top-chrome RepresentationModeControl (since removed, along with the old, separate "Show
+    // pressure field" checkbox - see ControlPanel.ts and PressureFieldNode.ts for the rest of that change).
+    this.colorEnabledProperty = new BooleanProperty(false);
 
     // V3: TimeControlNode no longer owns a scenery-phet TimeSpeed bridge at all - model.playbackSpeedProperty
     // (a plain, physics-only 3-way Property, see SoundWavesModel.ts's PlaybackSpeed doc comment) is bound
@@ -204,15 +224,17 @@ export class SoundWavesScreenView extends ScreenView {
 
     // Background shading layer - added to this.children FIRST (below) so it always renders behind the
     // particle field and every other Node, per its own "purely decorative background" doc comment.
-    this.pressureFieldNode = new PressureFieldNode(model, { ...fieldOrigins, showPressureFieldProperty: this.showPressureFieldProperty, representationModeProperty: this.representationModeProperty });
+    this.pressureFieldNode = new PressureFieldNode(model, { ...fieldOrigins, colorEnabledProperty: this.colorEnabledProperty });
 
-    // CompressionTrackerNode is deliberately NOT given representationModeProperty - its ghosted/dashed/
-    // low-opacity treatment stays IDENTICAL in both Real and Pedagogical mode (see that file's own class
-    // doc for why: bolding it in sync with a bold field risks reading as "discrete traveling objects riding
-    // along with solid stripes", exactly the misconception its own disclaimer text exists to prevent).
-    this.particleFieldNode = new ParticleFieldNode(model, { ...fieldOrigins, representationModeProperty: this.representationModeProperty });
+    // CompressionTrackerNode and WavefrontMarkerNode are deliberately NOT given colorEnabledProperty -
+    // their treatment stays IDENTICAL regardless of Color (see CompressionTrackerNode's own class doc for
+    // why: bolding it in sync with a bold field risks reading as "discrete traveling objects riding along
+    // with solid stripes", exactly the misconception its own disclaimer text exists to prevent).
+    this.particleFieldNode = new ParticleFieldNode(model, { ...fieldOrigins, colorEnabledProperty: this.colorEnabledProperty });
 
     this.compressionTrackerNode = new CompressionTrackerNode(model, { ...fieldOrigins, visibleProperty: this.showCompressionTrackerProperty });
+
+    this.wavefrontMarkerNode = new WavefrontMarkerNode(model, { ...fieldOrigins, visibleProperty: this.showWavefrontProperty });
 
     // PressureGraphNode always reflects the plane wave's own fixed sample cache (see its own doc comment
     // and SoundWavesModel.ts's recomputeSamples) - shown only when BOTH the checkbox is on AND
@@ -228,9 +250,9 @@ export class SoundWavesScreenView extends ScreenView {
     const controlPanel = new ControlPanel(model, {
       showPressureGraphProperty: this.showPressureGraphProperty,
       showRulerProperty: this.showRulerProperty,
-      showPressureFieldProperty: this.showPressureFieldProperty,
       showCompressionTrackerProperty: this.showCompressionTrackerProperty,
-      representationModeProperty: this.representationModeProperty,
+      showWavefrontProperty: this.showWavefrontProperty,
+      colorEnabledProperty: this.colorEnabledProperty,
     });
     controlPanel.right = this.layoutBounds.maxX - 16;
     controlPanel.top = this.layoutBounds.minY + 16;
@@ -255,10 +277,6 @@ export class SoundWavesScreenView extends ScreenView {
     propagationModeControl.left = infoButton.right + 16;
     propagationModeControl.top = this.layoutBounds.minY + 16;
 
-    const representationModeControl = new RepresentationModeControl(this.representationModeProperty);
-    representationModeControl.left = propagationModeControl.right + 16;
-    representationModeControl.top = this.layoutBounds.minY + 16;
-
     const zoomControl = new ZoomControl(this.viewZoomProperty);
     zoomControl.left = infoButton.left;
     // BUG FIX (QA + pedagogy re-review): this used to read `this.layoutBounds.minY + 16 + TOP_CHROME_ROW_GAP
@@ -268,7 +286,8 @@ export class SoundWavesScreenView extends ScreenView {
     // comment above for the corrected 106/134/138 chain this now actually matches (it previously did not).
     zoomControl.top = this.layoutBounds.minY + 100 + TOP_CHROME_ROW_GAP; // = 106: row 1's conservative bottom (100) + gap
 
-    // ---- Draggable ruler (opt-in, default hidden; calibrated for Local zoom only - see RULER_WIDTH) ----
+    // ---- Draggable ruler (opt-in, default hidden; one RulerNode per zoom level, see RULER_WIDTH's own
+    // comment above for why) ----
     //
     // A prior QA review moved this default position to sit in the gap between the (then single-row) top
     // chrome and the particle field, rather than inside PressureGraphNode's chart rectangle (which the
@@ -318,32 +337,48 @@ export class SoundWavesScreenView extends ScreenView {
     // error here would only affect its non-colliding DEFAULT position, not correctness.
     this.rulerPositionProperty = new Vector2Property(new Vector2(zoomControl.right + RULER_HORIZONTAL_MARGIN, 138));
     const rulerDragBoundsProperty = new Property(this.layoutBounds.eroded(10));
-    const rulerVisibleProperty = new DerivedProperty([this.showRulerProperty, this.viewZoomProperty], (show, zoom) => show && zoom === "local");
+    // SHARED position/drag-bounds across both zoom levels' RulerNode instances (see the section comment
+    // above) - dragging one, then switching zoom, leaves the ruler at the same SCREEN position rather
+    // than resetting it, which is what a student would expect ("the ruler" staying put as a single tool,
+    // even though which underlying Node represents it changes).
+    const localRulerVisibleProperty = new DerivedProperty([this.showRulerProperty, this.viewZoomProperty], (show, zoom) => show && zoom === "local");
+    const fieldRulerVisibleProperty = new DerivedProperty([this.showRulerProperty, this.viewZoomProperty], (show, zoom) => show && zoom === "field");
 
-    const rulerNode = new RulerNode(RULER_WIDTH, 36, RULER_MAJOR_TICK_SPACING, ["0", "20", "40", "60", "80", "100"], "cm", {
-      visibleProperty: rulerVisibleProperty,
+    const localRulerNode = new RulerNode(RULER_WIDTH, 36, RULER_MAJOR_TICK_SPACING, ["0", "20", "40", "60", "80", "100"], "cm", {
+      visibleProperty: localRulerVisibleProperty,
       tagName: "div",
       focusable: true,
       accessibleName: "Ruler",
-      accessibleHelpText: "Drag to measure distances along the domain, such as the spacing between two compressions. Only available at Local zoom.",
+      accessibleHelpText: "Drag to measure distances along the domain, such as the spacing between two compressions.",
       cursor: "pointer",
     });
-    rulerNode.translation = this.rulerPositionProperty.value;
-    this.rulerPositionProperty.link((position) => {
-      rulerNode.translation = position;
+    const fieldRulerNode = new RulerNode(FIELD_RULER_WIDTH, 36, FIELD_RULER_MAJOR_TICK_SPACING, ["0", "1", "2", "3", "4", "5"], "m", {
+      visibleProperty: fieldRulerVisibleProperty,
+      tagName: "div",
+      focusable: true,
+      accessibleName: "Ruler",
+      accessibleHelpText: "Drag to measure distances along the domain, such as the spacing between two compressions.",
+      cursor: "pointer",
     });
-    rulerNode.addInputListener(
-      new DragListener({
-        positionProperty: this.rulerPositionProperty,
-        dragBoundsProperty: rulerDragBoundsProperty,
-      }),
-    );
-    rulerNode.addInputListener(
-      new KeyboardDragListener({
-        positionProperty: this.rulerPositionProperty,
-        dragBoundsProperty: rulerDragBoundsProperty,
-      }),
-    );
+
+    for (const ruler of [localRulerNode, fieldRulerNode]) {
+      ruler.translation = this.rulerPositionProperty.value;
+      this.rulerPositionProperty.link((position) => {
+        ruler.translation = position;
+      });
+      ruler.addInputListener(
+        new DragListener({
+          positionProperty: this.rulerPositionProperty,
+          dragBoundsProperty: rulerDragBoundsProperty,
+        }),
+      );
+      ruler.addInputListener(
+        new KeyboardDragListener({
+          positionProperty: this.rulerPositionProperty,
+          dragBoundsProperty: rulerDragBoundsProperty,
+        }),
+      );
+    }
 
     const resetAllButton = new ResetAllButton({
       listener: () => {
@@ -360,13 +395,14 @@ export class SoundWavesScreenView extends ScreenView {
       this.loudspeakerNode,
       this.pointSourceNode,
       this.compressionTrackerNode,
+      this.wavefrontMarkerNode,
       this.pressureGraphNode,
       propagationModeControl,
-      representationModeControl,
       zoomControl,
       controlPanel,
       infoButton,
-      rulerNode,
+      localRulerNode,
+      fieldRulerNode,
       resetAllButton,
     ];
   }
@@ -381,16 +417,17 @@ export class SoundWavesScreenView extends ScreenView {
     this.particleFieldNode.step();
     this.pressureFieldNode.step();
     this.compressionTrackerNode.step();
+    this.wavefrontMarkerNode.step();
     this.pressureGraphNode.step();
   }
 
   public reset(): void {
     this.showPressureGraphProperty.reset();
     this.showRulerProperty.reset();
-    this.showPressureFieldProperty.reset();
     this.showCompressionTrackerProperty.reset();
+    this.showWavefrontProperty.reset();
+    this.colorEnabledProperty.reset();
     this.viewZoomProperty.reset();
-    this.representationModeProperty.reset();
     this.rulerPositionProperty.reset();
   }
 }

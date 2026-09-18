@@ -608,6 +608,19 @@ export class SoundWavesModel {
   }
 
   /**
+   * Distance (m) the wavefront has traveled from the source since t=0 - exactly c*simulationTime, the
+   * direct physical meaning of this class's own retarded-time clock (a point at distance x is still at
+   * rest iff x > this value - see sampleAtRetardedDistance()'s retardedTime<=0 branch, which is exactly
+   * the same condition x/c > simulationTime rearranged). Used by the "Show wavefront" overlay (a single
+   * marker at the leading edge) - a distinct concept from the compression tracker (which marks every
+   * individual periodic compression, not just the leading edge). Identical meaning in both propagation
+   * modes (a radius in spherical mode, an x-position in plane mode) since both share this same clock.
+   */
+  public getWavefrontDistance(): number {
+    return this.simulationTime * this.speedOfSoundProperty.value;
+  }
+
+  /**
    * Shared low-level sample: given a retarded time (t - distance/c, already computed by the caller for
    * either a plane x or a spherical r) and the amplitude that applies AT that distance (constant for the
    * plane wave, r-dependent for the spherical wave - see sampleAt()/sampleAtRadius() above), runs the

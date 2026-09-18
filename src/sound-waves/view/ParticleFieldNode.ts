@@ -12,19 +12,18 @@ import { AMPLITUDE_SAFETY_FRACTION, DOMAIN_LENGTH, FREQUENCY_RANGE, PROBE_POSITI
 
 export type ViewZoom = "local" | "field";
 
-// ---- Representation mode (view-only state - see SoundWavesScreenView.ts, NOT a model Property; V3
-// addition) ----
-
-/**
- * 'real': the sim's original, precise/quantitative rendering (unchanged behavior everywhere).
- * 'pedagogical': a bolder, more legible rendering tuned for "is the wave visually obvious" over "is the
- * shading quantitatively precise" - see PressureFieldNode.ts's redraw() for where this actually changes
- * anything. Deliberately NOT joined to any geometry-rebuild Multilink anywhere it is consumed - every
- * consumer reads it only inside its existing per-frame redraw() method, never rebuild(), so switching
- * modes is guaranteed jump-free (no re-layout, no discontinuity - physical state/play state is fully
- * preserved automatically since nothing model-side changes when this Property changes).
- */
-export type RepresentationMode = "real" | "pedagogical";
+// ---- Color mode (view-only state - see SoundWavesScreenView.ts, NOT a model Property) ----
+//
+// A single boolean, toggled by ControlPanel.ts's "Color" checkbox next to Amplitude: off is the sim's
+// original, precise/quantitative rendering (unchanged everywhere); on is a bolder, more legible
+// rendering tuned for "is the wave visually obvious" over "is the shading quantitatively precise" - see
+// PressureFieldNode.ts's redraw() for where this actually changes anything. Deliberately NOT joined to
+// any geometry-rebuild Multilink anywhere it is consumed - every consumer reads it only inside its
+// existing per-frame redraw() method, never rebuild(), so toggling it is guaranteed jump-free (no
+// re-layout, no discontinuity - physical state/play state is fully preserved automatically since nothing
+// model-side changes when this Property changes). Previously exposed as a top-chrome 'real'/'pedagogical'
+// mode selector (RepresentationModeControl, since removed) - collapsed to this one boolean once "Color"
+// absorbed the only behavior difference the two mode options ever had.
 
 // Fixed on-screen pixel footprint for the visible field, regardless of zoom level - this is what makes
 // "zooming" feel like showing more of the domain in the same screen space, rather than resizing the
@@ -65,8 +64,11 @@ export function pixelsPerMeterForZoom(zoom: ViewZoom): number {
 // pressure shading rings, and the compression-tracker rings can never drift out of scale with each other.
 export const SPHERICAL_FIELD_PIXEL_WIDTH = 420; // px diameter -> 210px radius, constant across zoom
 // levels (see the cancellation above). V3 RE-CHECK: shrunk from 480 (240px radius) because the top chrome
-// grew from one row to two (see SoundWavesScreenView.ts's RepresentationModeControl addition) - the old
-// 240px radius no longer left enough clearance under the taller chrome. Verified against
+// grew from one row to two (originally to fit a since-removed RepresentationModeControl alongside
+// PropagationModeControl in row 1; row 1's height was already set by PropagationModeControl - the taller
+// of the two even back when RepresentationModeControl was still present - so removing the latter keeps
+// row 1's height, and every margin below, unchanged/still valid, just no longer tied to that control's
+// presence) - the old 240px radius no longer left enough clearance under the taller chrome. Verified against
 // SoundWavesScreenView.ts's SPHERICAL_ORIGIN_Y=385: top edge 385-210=175, bottom edge 385+210=595 - see
 // that file's layout comment for the full corrected arithmetic against the stage bounds, the two-row
 // chrome, and the ControlPanel. MUST-FIX RE-VERIFICATION (QA + pedagogy re-review): a zoomControl.top layout
@@ -166,6 +168,32 @@ function computeRingCount(maxRadiusMeters: number, minWavelength: number): numbe
   return clamp(raw, MIN_RING_COUNT, MAX_RING_COUNT);
 }
 
+// ---- Spherical-mode, FIELD-zoom-only layout: a Cartesian grid instead of concentric rings ----
+//
+// At Field zoom, spherical mode uses a rectangular (row/column) particle grid instead of the polar
+// rings rebuildSphericalRings() below builds for Local zoom - requested so Spherical's wide view reads
+// consistently with Plane's own Field view (also a rectangular grid), rather than a full circular disk.
+// Local zoom keeps the polar-ring layout unchanged. Physically nothing changes: each grid particle's
+// equilibrium is still converted to a (radius, angle) pair and driven by the exact same
+// model.sampleAtRadius(r) + redrawSpherical() this file already uses for the ring layout - only WHERE
+// the equilibrium positions come from differs (a rectangular sweep instead of a polar one).
+//
+// Particle budget kept the same order of magnitude as MAX_SPHERICAL_PARTICLES above (19*19=361 <= 380)
+// so switching zoom doesn't change the rendering cost much, mirroring that constant's own reasoning.
+const MAX_FIELD_GRID_SIDE = 19;
+const MIN_FIELD_GRID_SIDE = 6; // same floor reasoning as MIN_COLUMN_COUNT/MIN_RING_COUNT above
+
+// Small fixed (assigned once, never animated) per-particle jitter in both x and y - the Cartesian
+// analogue of SPHERICAL_RADIAL_JITTER_MAX/SPHERICAL_ANGULAR_JITTER_MAX below, same magnitude/purpose
+// (a gas-like texture), just in (x,y) rather than (r,angle) since this layout's equilibria are chosen
+// in Cartesian coordinates.
+const FIELD_GRID_JITTER_MAX = 0.02; // m
+
+function computeFieldGridSide(spanMeters: number, minWavelength: number): number {
+  const raw = Math.ceil(1 + 3 * (spanMeters / minWavelength));
+  return clamp(raw, MIN_FIELD_GRID_SIDE, MAX_FIELD_GRID_SIDE);
+}
+
 const TRACER_RADIUS = 5;
 const TRACER_FILL = "#e0592a";
 const TRACER_STROKE = "#8a3013";
@@ -203,14 +231,14 @@ const PROBE_GUIDE_STROKE = "rgba(31, 111, 111, 0.35)";
 const PROBE_GUIDE_LINE_DASH = [3, 3];
 const PROBE_GUIDE_HALF_HEIGHT = (ROW_COUNT * ROW_SPACING) / 2;
 
-// ---- Pedagogical contrast boost (V3 addition) - styling ONLY, applied via redraw() below (never
-// rebuild()), so a representationMode switch never re-lays-out the field; see applyRepresentationStyling()
-// for where these are used. No geometry, count, or position changes anywhere in this file for this mode -
-// only stroke colors/widths on the SAME Nodes rebuild() already created. ----
+// ---- Color-mode contrast boost - styling ONLY, applied via redraw() below (never rebuild()), so
+// toggling "Color" never re-lays-out the field; see applyColorStyling() for where these are used. No
+// geometry, count, or position changes anywhere in this file for this mode - only stroke colors/widths
+// on the SAME Nodes rebuild() already created. ----
 
-// Ordinary (non-tracer) particles have NO stroke at all in Real mode (see rebuildPlane/rebuildSpherical
-// below: `new Circle(PARTICLE_RADIUS, { fill: PARTICLE_FILL })`). PressureFieldNode's Pedagogical tier is
-// deliberately much bolder than Real mode's background shading, so a thin, dark, high-contrast outline
+// Ordinary (non-tracer) particles have NO stroke at all with Color off (see rebuildPlane/rebuildSpherical
+// below: `new Circle(PARTICLE_RADIUS, { fill: PARTICLE_FILL })`). PressureFieldNode's Color-on tier is
+// deliberately much bolder than Color-off's background shading, so a thin, dark, high-contrast outline
 // keeps ordinary particles legible against it.
 //
 // MUST-FIX (pedagogy re-review): a thin stroke alone was not enough - PARTICLE_FILL ("#5b6b7a", a blue-gray)
@@ -227,28 +255,28 @@ const PROBE_GUIDE_HALF_HEIGHT = (ROW_COUNT * ROW_SPACING) / 2;
 //     white): contrast ratio ~= 1.27:1 - similarly low by LUMINANCE alone; the compression side only reads
 //     fine in practice because of hue distance, which this metric doesn't capture, not because its
 //     luminance contrast was actually any better.
-// FIX: in Pedagogical mode ONLY (Real mode keeps PARTICLE_FILL unchanged, via applyRepresentationStyling()
-// below - its own background shading never gets this bold, see PressureFieldNode's SUBTLE/PROMINENT ceilings
-// vs. the Pedagogical tier's 0.88), ordinary particles get a pale, near-white, slightly warm-toned fill
-// instead - equidistant from both the warm compression and cool rarefaction hues, so it can't collide with
-// either side the way a saturated color would, and a lightness-based contrast fix that (unlike hue distance)
-// actually helps against BOTH:
-//   - PEDAGOGICAL_PARTICLE_FILL "#f7f1e6" (L~=0.884): vs. rarefaction tier 4 (L~=0.183), contrast ratio ~=
+// FIX: with Color ON ONLY (Color off keeps PARTICLE_FILL unchanged, via applyColorStyling() below - its
+// own background shading never gets this bold, see PressureFieldNode's SUBTLE ceiling vs. the Color tier's
+// 0.88), ordinary particles get a pale, near-white, slightly warm-toned fill instead - equidistant from
+// both the warm compression and cool rarefaction hues, so it can't collide with either side the way a
+// saturated color would, and a lightness-based contrast fix that (unlike hue distance) actually helps
+// against BOTH:
+//   - COLOR_PARTICLE_FILL "#f7f1e6" (L~=0.884): vs. rarefaction tier 4 (L~=0.183), contrast ratio ~=
 //     (0.884+0.05)/(0.183+0.05) ~= 4.0:1. vs. compression tier 4 (L~=0.194), contrast ratio ~=
 //     (0.884+0.05)/(0.194+0.05) ~= 3.8:1. Both comfortably clear the >=3:1 guideline, on BOTH sides.
-// The dark stroke is kept (and thickened slightly, see PEDAGOGICAL_PARTICLE_STROKE_WIDTH) for shape
+// The dark stroke is kept (and thickened slightly, see COLOR_PARTICLE_STROKE_WIDTH) for shape
 // definition against the pale fill, not as the primary contrast mechanism any more.
-const PEDAGOGICAL_PARTICLE_FILL = "#f7f1e6";
-const PEDAGOGICAL_PARTICLE_STROKE = "#22303d";
-const PEDAGOGICAL_PARTICLE_STROKE_WIDTH = 1; // bumped from 0.75 - see PEDAGOGICAL_PARTICLE_FILL's comment above; contrast now comes mainly from the fill swap, this just keeps the small (2.2px-radius) circle's edge crisp against a pale fill
+const COLOR_PARTICLE_FILL = "#f7f1e6";
+const COLOR_PARTICLE_STROKE = "#22303d";
+const COLOR_PARTICLE_STROKE_WIDTH = 1; // bumped from 0.75 - see COLOR_PARTICLE_FILL's comment above; contrast now comes mainly from the fill swap, this just keeps the small (2.2px-radius) circle's edge crisp against a pale fill
 
 // Darker/higher-contrast than TICK_STROKE's light gray, for the same "stay legible against a bolder
 // background" reason.
-const PEDAGOGICAL_TICK_STROKE = "#6b6b6b";
+const COLOR_TICK_STROKE = "#6b6b6b";
 
 // Boosted-opacity variants of TRACER_RING_STROKE/TRACER_TETHER_STROKE above (same hue, higher alpha).
-const PEDAGOGICAL_TRACER_RING_STROKE = "rgba(138, 48, 19, 0.7)";
-const PEDAGOGICAL_TRACER_TETHER_STROKE = "rgba(138, 48, 19, 0.85)";
+const COLOR_TRACER_RING_STROKE = "rgba(138, 48, 19, 0.7)";
+const COLOR_TRACER_TETHER_STROKE = "rgba(138, 48, 19, 0.85)";
 
 // Below this on-screen spacing (px) between adjacent equilibrium reference lines (plane mode's vertical
 // ticks, spherical mode's concentric rings), they start to visually blur into a solid line/moire pattern
@@ -278,7 +306,7 @@ export type ParticleFieldNodeOptions = {
   sphericalOriginX: number; // view x (px) of the spherical-mode point source
   sphericalOriginY: number; // view y (px) of the spherical-mode point source
   viewZoomProperty: TReadOnlyProperty<ViewZoom>;
-  representationModeProperty: TReadOnlyProperty<RepresentationMode>;
+  colorEnabledProperty: TReadOnlyProperty<boolean>;
 };
 
 type PlaneParticleSpec = { equilibriumXMeters: number; yView: number; isTracer: boolean };
@@ -311,10 +339,9 @@ type SphericalParticleSpec = { equilibriumRadiusMeters: number; angleRadians: nu
  * fixed at rebuild time and never recomputed from anything time-varying, which is what guarantees pure
  * radial oscillation with no possibility of apparent tangential drift.
  *
- * V3 addition - Pedagogical contrast boost: representationModeProperty (see RepresentationMode's own doc
- * comment above) is read ONLY inside redraw() (via applyRepresentationStyling()), never inside rebuild()/
- * the geometry Multilink, so a mode switch is guaranteed jump-free - styling only, no geometry/count/
- * position changes.
+ * Color-mode contrast boost: colorEnabledProperty (see the "Color mode" section's own doc comment above)
+ * is read ONLY inside redraw() (via applyColorStyling()), never inside rebuild()/the geometry Multilink,
+ * so toggling Color is guaranteed jump-free - styling only, no geometry/count/position changes.
  *
  * V4 addition - fixed pressure probe: a single stationary marker + thin vertical guide line at the fixed
  * physical position PROBE_POSITION_METERS (see that constant's own doc comment in SoundWavesModel.ts),
@@ -332,7 +359,7 @@ type SphericalParticleSpec = { equilibriumRadiusMeters: number; angleRadians: nu
 export class ParticleFieldNode extends Node {
   private readonly model: SoundWavesModel;
   private readonly viewZoomProperty: TReadOnlyProperty<ViewZoom>;
-  private readonly representationModeProperty: TReadOnlyProperty<RepresentationMode>;
+  private readonly colorEnabledProperty: TReadOnlyProperty<boolean>;
   private readonly planeOriginX: number;
   private readonly planeOriginY: number;
   private readonly sphericalOriginX: number;
@@ -358,19 +385,19 @@ export class ParticleFieldNode extends Node {
   private tracerEquilibriumViewX = 0;
   private tracerEquilibriumViewY = 0;
 
-  // Tracks which representationMode styling (see applyRepresentationStyling() below) is CURRENTLY applied
-  // to the live Nodes, so redraw() only needs to touch stroke colors when the mode actually changes (or
-  // right after a rebuild() - see rebuild()'s own reset of this field - not on every single frame). null
-  // forces a (re)application on the very next redraw(), which rebuild() relies on since it creates brand
-  // new, unstyled Nodes every time it runs.
-  private lastStyledRepresentationMode: RepresentationMode | null = null;
+  // Tracks which colorEnabled styling (see applyColorStyling() below) is CURRENTLY applied to the live
+  // Nodes, so redraw() only needs to touch stroke colors when the setting actually changes (or right
+  // after a rebuild() - see rebuild()'s own reset of this field - not on every single frame). null forces
+  // a (re)application on the very next redraw(), which rebuild() relies on since it creates brand new,
+  // unstyled Nodes every time it runs.
+  private lastStyledColorEnabled: boolean | null = null;
 
   public constructor(model: SoundWavesModel, options: ParticleFieldNodeOptions) {
     super();
 
     this.model = model;
     this.viewZoomProperty = options.viewZoomProperty;
-    this.representationModeProperty = options.representationModeProperty;
+    this.colorEnabledProperty = options.colorEnabledProperty;
     this.planeOriginX = options.planeOriginX;
     this.planeOriginY = options.planeOriginY;
     this.sphericalOriginX = options.sphericalOriginX;
@@ -414,16 +441,15 @@ export class ParticleFieldNode extends Node {
     if (this.currentMode === "plane") {
       this.rebuildPlane(visibleWidthMeters);
     } else {
-      this.rebuildSpherical(visibleWidthMeters / 2);
+      this.rebuildSpherical(visibleWidthMeters / 2, zoom);
     }
 
-    // Every Node just (re)created above starts out with Real-mode's default (unstyled) look, regardless of
-    // representationModeProperty's actual current value - forcing a (re)application on the very next
-    // redraw() below, rather than relying on lastStyledRepresentationMode having genuinely "changed" (it
-    // may well still equal the current mode from before this rebuild), is what keeps a rebuild (e.g. a
-    // zoom change while already in Pedagogical mode) from silently reverting styling until the mode is
-    // next toggled.
-    this.lastStyledRepresentationMode = null;
+    // Every Node just (re)created above starts out with Color-off's default (unstyled) look, regardless
+    // of colorEnabledProperty's actual current value - forcing a (re)application on the very next
+    // redraw() below, rather than relying on lastStyledColorEnabled having genuinely "changed" (it may
+    // well still equal the current value from before this rebuild), is what keeps a rebuild (e.g. a zoom
+    // change while Color is already on) from silently reverting styling until Color is next toggled.
+    this.lastStyledColorEnabled = null;
 
     this.redraw();
   }
@@ -477,7 +503,18 @@ export class ParticleFieldNode extends Node {
     this.buildProbe(pixelsPerMeter);
   }
 
-  private rebuildSpherical(maxRadiusMeters: number): void {
+  /** Dispatches to whichever spherical-mode layout the current zoom uses - see the "FIELD-zoom-only
+   * layout" section's own comment above for why Field zoom gets a rectangular grid instead of Local
+   * zoom's polar rings. */
+  private rebuildSpherical(maxRadiusMeters: number, zoom: ViewZoom): void {
+    if (zoom === "field") {
+      this.rebuildSphericalGrid(maxRadiusMeters);
+    } else {
+      this.rebuildSphericalRings(maxRadiusMeters);
+    }
+  }
+
+  private rebuildSphericalRings(maxRadiusMeters: number): void {
     const ringCount = computeRingCount(maxRadiusMeters, this.minWavelength());
     const pixelsPerMeter = this.currentPixelsPerMeter;
 
@@ -517,6 +554,67 @@ export class ParticleFieldNode extends Node {
         if (isTracer) {
           tracerAssigned = true;
         }
+
+        const particle = isTracer
+          ? new Circle(TRACER_RADIUS, { fill: TRACER_FILL, stroke: TRACER_STROKE, lineWidth: 1.5 })
+          : new Circle(PARTICLE_RADIUS, { fill: PARTICLE_FILL });
+
+        this.sphericalSpecs.push({ equilibriumRadiusMeters: radiusMeters, angleRadians, isTracer });
+        this.particles.push(particle);
+        this.particlesLayer.addChild(particle);
+        if (isTracer) {
+          this.tracerIndex = this.particles.length - 1;
+          this.tracerEquilibriumViewX = this.sphericalOriginX + radiusMeters * pixelsPerMeter * Math.cos(angleRadians);
+          this.tracerEquilibriumViewY = this.sphericalOriginY + radiusMeters * pixelsPerMeter * Math.sin(angleRadians);
+        }
+
+        particleIndex++;
+      }
+    }
+
+    this.buildTracerAids();
+  }
+
+  /** Field-zoom-only spherical layout: a rectangular grid of particles (rows/columns in x/y, centered on
+   * the source) instead of rebuildSphericalRings()'s concentric rings - see the "FIELD-zoom-only layout"
+   * section's own comment above. Each grid particle's fixed (x,y) equilibrium is converted to the SAME
+   * (radius, angle) SphericalParticleSpec shape rebuildSphericalRings() produces, so redrawSpherical()
+   * (which only ever reads radius+angle, never how they were chosen) drives both layouts identically -
+   * no per-frame changes needed for this to animate correctly. */
+  private rebuildSphericalGrid(halfExtentMeters: number): void {
+    const pixelsPerMeter = this.currentPixelsPerMeter;
+    const gridSide = computeFieldGridSide(2 * halfExtentMeters, this.minWavelength());
+
+    this.sphericalSpecs = [];
+    // Off-center on purpose (not the exact middle row/column, which would sit on top of the point-source
+    // icon at the grid's own center) - see this method's own tracer-placement reasoning, the Cartesian
+    // analogue of rebuildSphericalRings()'s tracerRingIndex choice.
+    const tracerRow = Math.floor(gridSide / 2);
+    const tracerColumn = Math.floor(gridSide / 2) + Math.floor(gridSide / 4);
+
+    let particleIndex = 0;
+    for (let row = 0; row < gridSide; row++) {
+      for (let column = 0; column < gridSide; column++) {
+        if (this.particles.length >= MAX_SPHERICAL_PARTICLES) {
+          break;
+        }
+
+        // Evenly spaced across [-halfExtentMeters, halfExtentMeters] in both axes, centered on the source.
+        const baseX = gridSide > 1 ? -halfExtentMeters + (column / (gridSide - 1)) * 2 * halfExtentMeters : 0;
+        const baseY = gridSide > 1 ? -halfExtentMeters + (row / (gridSide - 1)) * 2 * halfExtentMeters : 0;
+        const equilibriumX = baseX + jitterFor(particleIndex * 2, FIELD_GRID_JITTER_MAX);
+        const equilibriumY = baseY + jitterFor(particleIndex * 2 + 1, FIELD_GRID_JITTER_MAX);
+
+        // Skip positions inside the source's own footprint - matches rebuildSphericalRings() starting
+        // its innermost ring at SPHERICAL_SOURCE_RADIUS, not r=0.
+        const radiusMeters = Math.hypot(equilibriumX, equilibriumY);
+        if (radiusMeters < SPHERICAL_SOURCE_RADIUS) {
+          particleIndex++;
+          continue;
+        }
+        const angleRadians = Math.atan2(equilibriumY, equilibriumX);
+
+        const isTracer = row === tracerRow && column === tracerColumn;
 
         const particle = isTracer
           ? new Circle(TRACER_RADIUS, { fill: TRACER_FILL, stroke: TRACER_STROKE, lineWidth: 1.5 })
@@ -594,16 +692,15 @@ export class ParticleFieldNode extends Node {
   }
 
   private redraw(): void {
-    // representationModeProperty is read HERE ONLY - never inside rebuild()/the geometry Multilink above -
-    // so a mode switch never re-lays-out the field (see RepresentationMode's own doc comment above and
-    // this class's own doc comment). Only actually restyles when the mode has changed since the last
-    // redraw() (or right after a rebuild() reset this to null) - see lastStyledRepresentationMode's own
-    // comment - so ordinary frames (no mode change) pay no extra per-frame cost beyond the usual
-    // position updates below.
-    const representationMode = this.representationModeProperty.value;
-    if (representationMode !== this.lastStyledRepresentationMode) {
-      this.applyRepresentationStyling(representationMode);
-      this.lastStyledRepresentationMode = representationMode;
+    // colorEnabledProperty is read HERE ONLY - never inside rebuild()/the geometry Multilink above - so
+    // toggling Color never re-lays-out the field (see the "Color mode" section's own doc comment above
+    // and this class's own doc comment). Only actually restyles when the value has changed since the last
+    // redraw() (or right after a rebuild() reset this to null) - see lastStyledColorEnabled's own comment
+    // - so ordinary frames (no change) pay no extra per-frame cost beyond the usual position updates below.
+    const colorEnabled = this.colorEnabledProperty.value;
+    if (colorEnabled !== this.lastStyledColorEnabled) {
+      this.applyColorStyling(colorEnabled);
+      this.lastStyledColorEnabled = colorEnabled;
     }
 
     if (this.currentMode === "plane") {
@@ -618,36 +715,34 @@ export class ParticleFieldNode extends Node {
     }
   }
 
-  /** Styling-only Pedagogical contrast boost (V3 addition, see the constants' own comments above) - NO
-   * geometry, count, or position changes: every Node touched here already exists (created by rebuild()),
-   * only fill/stroke colors/widths change. In 'real' mode, restores each Node's ORIGINAL Real-mode look
-   * exactly (ordinary particles: original PARTICLE_FILL, no stroke at all; ticks/tracer ring/tether: their
-   * original, lower-contrast colors) - so switching back to Real never leaves any Pedagogical styling
-   * behind. MUST-FIX (pedagogy re-review): ordinary particles now also swap FILL (not just stroke) in
-   * Pedagogical mode - see PEDAGOGICAL_PARTICLE_FILL's own comment for why a thin stroke alone wasn't
-   * enough contrast against bold rarefaction bands. */
-  private applyRepresentationStyling(mode: RepresentationMode): void {
-    const pedagogical = mode === "pedagogical";
-
+  /** Styling-only Color-mode contrast boost (see the constants' own comments above) - NO geometry,
+   * count, or position changes: every Node touched here already exists (created by rebuild()), only
+   * fill/stroke colors/widths change. With Color off, restores each Node's ORIGINAL look exactly
+   * (ordinary particles: original PARTICLE_FILL, no stroke at all; ticks/tracer ring/tether: their
+   * original, lower-contrast colors) - so switching Color off never leaves any of its styling behind.
+   * MUST-FIX (pedagogy re-review): ordinary particles also swap FILL (not just stroke) when Color is on
+   * - see COLOR_PARTICLE_FILL's own comment for why a thin stroke alone wasn't enough contrast against
+   * bold rarefaction bands. */
+  private applyColorStyling(colorEnabled: boolean): void {
     for (let i = 0; i < this.particles.length; i++) {
       if (i === this.tracerIndex) {
-        continue; // the tracer particle keeps its own always-on TRACER_FILL/TRACER_STROKE in both modes - untouched here.
+        continue; // the tracer particle keeps its own always-on TRACER_FILL/TRACER_STROKE either way - untouched here.
       }
       const particle = this.particles[i];
-      particle.fill = pedagogical ? PEDAGOGICAL_PARTICLE_FILL : PARTICLE_FILL;
-      particle.stroke = pedagogical ? PEDAGOGICAL_PARTICLE_STROKE : null;
-      particle.lineWidth = PEDAGOGICAL_PARTICLE_STROKE_WIDTH;
+      particle.fill = colorEnabled ? COLOR_PARTICLE_FILL : PARTICLE_FILL;
+      particle.stroke = colorEnabled ? COLOR_PARTICLE_STROKE : null;
+      particle.lineWidth = COLOR_PARTICLE_STROKE_WIDTH;
     }
 
     for (const tick of this.ticksLayer.children) {
-      (tick as Line | Circle).stroke = pedagogical ? PEDAGOGICAL_TICK_STROKE : TICK_STROKE;
+      (tick as Line | Circle).stroke = colorEnabled ? COLOR_TICK_STROKE : TICK_STROKE;
     }
 
     if (this.tracerRing !== null) {
-      this.tracerRing.stroke = pedagogical ? PEDAGOGICAL_TRACER_RING_STROKE : TRACER_RING_STROKE;
+      this.tracerRing.stroke = colorEnabled ? COLOR_TRACER_RING_STROKE : TRACER_RING_STROKE;
     }
     if (this.tracerTether !== null) {
-      this.tracerTether.stroke = pedagogical ? PEDAGOGICAL_TRACER_TETHER_STROKE : TRACER_TETHER_STROKE;
+      this.tracerTether.stroke = colorEnabled ? COLOR_TRACER_TETHER_STROKE : TRACER_TETHER_STROKE;
     }
   }
 

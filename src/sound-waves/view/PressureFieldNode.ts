@@ -2,7 +2,7 @@ import { Multilink } from "scenerystack/axon";
 import type { TReadOnlyProperty } from "scenerystack/axon";
 import { Circle, Node, Rectangle } from "scenerystack/scenery";
 import { AIR_DENSITY, SPHERICAL_SOURCE_RADIUS, SoundWavesModel, angularFrequency } from "../model/SoundWavesModel.js";
-import { VIEW_WIDTH_METERS, pixelsPerMeterForZoom, sphericalPixelsPerMeterForZoom, type RepresentationMode, type ViewZoom } from "./ParticleFieldNode.js";
+import { VIEW_WIDTH_METERS, pixelsPerMeterForZoom, sphericalPixelsPerMeterForZoom, type ViewZoom } from "./ParticleFieldNode.js";
 
 // This file is VIEW code. All physics (the pressure values themselves) lives in the model - this file
 // only reads model.sampleAt(x).pressure (plane mode) / model.sampleAtRadius(r).pressure (spherical
@@ -25,77 +25,76 @@ const BAND_HEIGHT = 160; // px, plane mode - comfortably spans the particle fiel
 const COMPRESSION_RGB = "196, 60, 40";
 const RAREFACTION_RGB = "50, 100, 180";
 
-// Two-tier alpha ceilings: the ALWAYS-ON tier stays subtle (per the reviewed design, 0.12-0.15) so it
-// reads as ambient background texture, not a competing focal element; the opt-in "Show pressure field"
-// checkbox (see ControlPanel.ts's showPressureFieldProperty) raises the SAME bands' ceiling to a more
-// saturated, clearly-visible presentation - one tier of geometry, two alpha presentations, rather than
-// literally duplicating every band for a difference that is otherwise only alpha.
+// Always-on tier ceiling (per the reviewed design, 0.12-0.15) so it reads as ambient background
+// texture, not a competing focal element. This is the ONLY alpha ceiling redrawSubtle() ever uses now -
+// see that method's own comment for why the old opt-in "Show pressure field" boost (a second, separate
+// PROMINENT_MAX_ALPHA ceiling within this same continuous rendering) was retired in favor of the bolder,
+// visually distinct "Color" tier below.
 const SUBTLE_MAX_ALPHA = 0.14;
-const PROMINENT_MAX_ALPHA = 0.55;
 
-// ---- Pedagogical tier (V3 addition - bold, discrete-band rendering for representationModeProperty ----
-// ==='pedagogical'). Read ONLY inside redraw() below, never inside rebuild()/the geometry Multilink -
-// switching representationModeProperty must never rebuild band geometry, only repaint the SAME bands, so
-// the mode switch is guaranteed jump-free (see RepresentationMode's own doc comment in
-// ParticleFieldNode.ts).
+// ---- Color tier (bold, discrete-band rendering for colorEnabledProperty===true) ----
+//
+// Read ONLY inside redraw() below, never inside rebuild()/the geometry Multilink - toggling
+// colorEnabledProperty must never rebuild band geometry, only repaint the SAME bands, so the switch is
+// guaranteed jump-free (see colorEnabledProperty's own doc comment in ParticleFieldNode.ts).
 
 // Number of discrete magnitude tiers (design review: "4-5 magnitude tiers"). Chosen at the top of that
 // range (5) so successive tiers are still individually distinguishable at a glance without being so fine-
 // grained they blur back into looking like a smooth ramp (defeating the point of a discrete/bold tier
 // scheme).
-const PEDAGOGICAL_TIER_COUNT = 5;
+const COLOR_TIER_COUNT = 5;
 
 // Alpha ceiling per tier, monotonically increasing - tier 0 is ALSO the legibility floor's alpha (see
-// redrawPedagogical()'s magnitude<=0 branch): any point the wavefront has reached, however small its
+// redrawColor()'s magnitude<=0 branch): any point the wavefront has reached, however small its
 // magnitude, lands in tier 0 at minimum (the discretization itself IS the floor - there is no separate
-// clamp needed, since tier 0's own alpha is already comfortably nonzero, unlike the Real tier's alpha,
-// which ramps linearly all the way down to 0 and can fade into invisibility far from the source).
-const PEDAGOGICAL_TIER_ALPHAS = [0.22, 0.38, 0.54, 0.7, 0.88];
+// clamp needed, since tier 0's own alpha is already comfortably nonzero, unlike the continuous tier's
+// alpha, which ramps linearly all the way down to 0 and can fade into invisibility far from the source).
+const COLOR_TIER_ALPHAS = [0.22, 0.38, 0.54, 0.7, 0.88];
 
 // Lightness-toward-white mix per tier (0 = full base saturation, 1 = fully white) - the SECOND, independent
 // channel (alongside alpha) encoding magnitude, so tiers stay distinguishable even under a color-vision
 // deficiency that makes the alpha/saturation difference hard to see alone (dual-channel, colorblind-safe
 // encoding, per the design review). Decreasing alongside alpha's increase: higher-magnitude tiers are both
 // MORE opaque AND MORE saturated/darker.
-const PEDAGOGICAL_TIER_LIGHTEN = [0.5, 0.35, 0.2, 0.08, 0];
+const COLOR_TIER_LIGHTEN = [0.5, 0.35, 0.2, 0.08, 0];
 
 // Fraction of each tier's band width, at its END, over which a smoothstep-eased blend toward the NEXT
 // tier's alpha/lightness happens - keeps most of each band a FLAT, discrete color (so it still reads as
 // texture/tiers, per the design review, not a smooth ramp) while avoiding a razor-hard seam at every
 // internal tier boundary ("a small soft transition between tiers ... not a hard cutoff"). Deliberately NOT
-// applied to the wavefront boundary itself (see redrawPedagogical()'s magnitude<=0 branch) - that edge is a
+// applied to the wavefront boundary itself (see redrawColor()'s magnitude<=0 branch) - that edge is a
 // REAL physical boundary (already present for free in the retarded-time computation) and is kept as sharp
 // as possible instead, per the design review's explicit ask.
-const PEDAGOGICAL_BAND_BLEND_FRACTION = 0.3;
+const COLOR_BAND_BLEND_FRACTION = 0.3;
 
-/** Blends an "r, g, b" string toward white by `amount` (0=unchanged, 1=fully white) - the Pedagogical
- * tier's lightness channel, see PEDAGOGICAL_TIER_LIGHTEN's own comment. */
+/** Blends an "r, g, b" string toward white by `amount` (0=unchanged, 1=fully white) - the Color tier's
+ * lightness channel, see COLOR_TIER_LIGHTEN's own comment. */
 function lightenRgb(rgb: string, amount: number): string {
   const [r, g, b] = rgb.split(",").map((component) => Number(component.trim()));
   const mix = (channel: number): number => Math.round(channel + (255 - channel) * amount);
   return `${mix(r)}, ${mix(g)}, ${mix(b)}`;
 }
 
-/** Maps a continuous magnitude (0..1) and a base "r, g, b" hue-family string to a discrete-tier Pedagogical
- * rgba() color string - see PEDAGOGICAL_TIER_COUNT/PEDAGOGICAL_TIER_ALPHAS/PEDAGOGICAL_TIER_LIGHTEN/
- * PEDAGOGICAL_BAND_BLEND_FRACTION above for the full reasoning. Only ever called with magnitude > 0 - the
- * magnitude<=0 (not-yet-arrived) case is handled entirely separately in redrawPedagogical(), never via this
+/** Maps a continuous magnitude (0..1) and a base "r, g, b" hue-family string to a discrete-tier Color
+ * rgba() color string - see COLOR_TIER_COUNT/COLOR_TIER_ALPHAS/COLOR_TIER_LIGHTEN/
+ * COLOR_BAND_BLEND_FRACTION above for the full reasoning. Only ever called with magnitude > 0 - the
+ * magnitude<=0 (not-yet-arrived) case is handled entirely separately in redrawColor(), never via this
  * function, so the wavefront's own boundary stays a hard edge rather than tier 0's soft internal blend. */
-function pedagogicalTierColor(magnitude: number, baseRgb: string): string {
+function colorTierColor(magnitude: number, baseRgb: string): string {
   const clamped = Math.min(1, Math.max(0, magnitude));
-  const scaled = clamped * PEDAGOGICAL_TIER_COUNT;
-  const tierIndex = Math.min(PEDAGOGICAL_TIER_COUNT - 1, Math.floor(scaled));
-  const nextTierIndex = Math.min(PEDAGOGICAL_TIER_COUNT - 1, tierIndex + 1);
+  const scaled = clamped * COLOR_TIER_COUNT;
+  const tierIndex = Math.min(COLOR_TIER_COUNT - 1, Math.floor(scaled));
+  const nextTierIndex = Math.min(COLOR_TIER_COUNT - 1, tierIndex + 1);
   const withinTier = scaled - tierIndex; // 0..1 position within this tier's own band
 
   let ease = 0;
-  if (withinTier > 1 - PEDAGOGICAL_BAND_BLEND_FRACTION) {
-    const t = (withinTier - (1 - PEDAGOGICAL_BAND_BLEND_FRACTION)) / PEDAGOGICAL_BAND_BLEND_FRACTION;
+  if (withinTier > 1 - COLOR_BAND_BLEND_FRACTION) {
+    const t = (withinTier - (1 - COLOR_BAND_BLEND_FRACTION)) / COLOR_BAND_BLEND_FRACTION;
     ease = t * t * (3 - 2 * t); // smoothstep
   }
 
-  const alpha = PEDAGOGICAL_TIER_ALPHAS[tierIndex] + ease * (PEDAGOGICAL_TIER_ALPHAS[nextTierIndex] - PEDAGOGICAL_TIER_ALPHAS[tierIndex]);
-  const lighten = PEDAGOGICAL_TIER_LIGHTEN[tierIndex] + ease * (PEDAGOGICAL_TIER_LIGHTEN[nextTierIndex] - PEDAGOGICAL_TIER_LIGHTEN[tierIndex]);
+  const alpha = COLOR_TIER_ALPHAS[tierIndex] + ease * (COLOR_TIER_ALPHAS[nextTierIndex] - COLOR_TIER_ALPHAS[tierIndex]);
+  const lighten = COLOR_TIER_LIGHTEN[tierIndex] + ease * (COLOR_TIER_LIGHTEN[nextTierIndex] - COLOR_TIER_LIGHTEN[tierIndex]);
 
   return `rgba(${lightenRgb(baseRgb, lighten)}, ${alpha})`;
 }
@@ -106,16 +105,15 @@ export type PressureFieldNodeOptions = {
   sphericalOriginX: number;
   sphericalOriginY: number;
   viewZoomProperty: TReadOnlyProperty<ViewZoom>;
-  showPressureFieldProperty: TReadOnlyProperty<boolean>;
-  representationModeProperty: TReadOnlyProperty<RepresentationMode>;
+  colorEnabledProperty: TReadOnlyProperty<boolean>;
 };
 
 type Band = { positionMeters: number; shape: Rectangle | Circle };
 
 /**
  * Background pressure-field shading behind the particle field. Two tiers (see SUBTLE_MAX_ALPHA/
- * PROMINENT_MAX_ALPHA above), both derived from the SAME model data ParticleFieldNode and
- * PressureGraphNode already use - never a separate pressure computation of its own.
+ * the Color tier above), both derived from the SAME model data ParticleFieldNode and PressureGraphNode
+ * already use - never a separate pressure computation of its own.
  *
  * PLANE mode: vertical bands across the visible width, colored per model.sampleAt(x).pressure.
  * SPHERICAL mode: per the design review's performance guidance, this does NOT naively evaluate the
@@ -129,17 +127,19 @@ type Band = { positionMeters: number; shape: Rectangle | Circle };
  * Rebuilds its band geometry (see rebuild()) whenever the view-owned zoom or the model's
  * propagationModeProperty changes, mirroring ParticleFieldNode's own rebuild-on-change pattern.
  *
- * V3 addition - Pedagogical tier: representationModeProperty (see ParticleFieldNode.ts's own doc comment)
- * is read ONLY inside redraw() below, never inside rebuild()/the geometry Multilink, so switching modes
- * never rebuilds band geometry - only repaints the SAME bands - guaranteeing a jump-free switch. 'real'
- * mode's rendering (redrawReal()) is completely unchanged from before this addition; 'pedagogical' mode
- * (redrawPedagogical()) uses discrete tonal bands instead - see PEDAGOGICAL_TIER_COUNT and friends above.
+ * Color tier: colorEnabledProperty (see ParticleFieldNode.ts's own doc comment) is read ONLY inside
+ * redraw() below, never inside rebuild()/the geometry Multilink, so toggling it never rebuilds band
+ * geometry - only repaints the SAME bands - guaranteeing a jump-free switch. Color-off's rendering
+ * (redrawSubtle()) is a plain, single-ceiling continuous alpha ramp; Color-on (redrawColor()) uses
+ * discrete tonal bands instead - see COLOR_TIER_COUNT and friends above. (Previously this file also had
+ * a separate, opt-in "Show pressure field" checkbox that boosted redrawSubtle()'s own ceiling to a
+ * second, PROMINENT alpha independent of Color - retired once "Color" became the one mechanism for
+ * making this shading more prominent, per the reviewed interaction design.)
  */
 export class PressureFieldNode extends Node {
   private readonly model: SoundWavesModel;
   private readonly viewZoomProperty: TReadOnlyProperty<ViewZoom>;
-  private readonly showPressureFieldProperty: TReadOnlyProperty<boolean>;
-  private readonly representationModeProperty: TReadOnlyProperty<RepresentationMode>;
+  private readonly colorEnabledProperty: TReadOnlyProperty<boolean>;
   private readonly planeOriginX: number;
   private readonly planeOriginY: number;
   private readonly sphericalOriginX: number;
@@ -153,8 +153,7 @@ export class PressureFieldNode extends Node {
 
     this.model = model;
     this.viewZoomProperty = options.viewZoomProperty;
-    this.showPressureFieldProperty = options.showPressureFieldProperty;
-    this.representationModeProperty = options.representationModeProperty;
+    this.colorEnabledProperty = options.colorEnabledProperty;
     this.planeOriginX = options.planeOriginX;
     this.planeOriginY = options.planeOriginY;
     this.sphericalOriginX = options.sphericalOriginX;
@@ -209,26 +208,26 @@ export class PressureFieldNode extends Node {
   }
 
   private redraw(): void {
-    // representationModeProperty is read HERE ONLY - never inside rebuild()/the geometry Multilink above -
-    // see the class doc's V3 addition paragraph for why that guarantees a jump-free mode switch.
-    if (this.representationModeProperty.value === "pedagogical") {
-      this.redrawPedagogical();
+    // colorEnabledProperty is read HERE ONLY - never inside rebuild()/the geometry Multilink above - see
+    // the class doc's Color tier paragraph for why that guarantees a jump-free toggle.
+    if (this.colorEnabledProperty.value) {
+      this.redrawColor();
     } else {
-      this.redrawReal();
+      this.redrawSubtle();
     }
   }
 
-  /** 'real' mode - UNCHANGED behavior from before the Pedagogical tier existed: a smooth, continuous
-   * alpha ramp (two ceilings - SUBTLE_MAX_ALPHA always-on, PROMINENT_MAX_ALPHA opt-in, see their own
-   * comments), same hue-family (compression/rarefaction) as every tier. */
-  private redrawReal(): void {
-    const maxAlpha = this.showPressureFieldProperty.value ? PROMINENT_MAX_ALPHA : SUBTLE_MAX_ALPHA;
+  /** Color-off rendering - a smooth, continuous alpha ramp at a single, always-subtle ceiling
+   * (SUBTLE_MAX_ALPHA), same hue-family (compression/rarefaction) as the Color tier. Used to have a
+   * second, opt-in PROMINENT ceiling here (the old "Show pressure field" checkbox) - retired once
+   * "Color" (redrawColor() below) became the one mechanism for a more prominent presentation. */
+  private redrawSubtle(): void {
     const peakPressure = this.estimatePeakPressure();
 
     for (const band of this.bands) {
       const sample = this.currentMode === "plane" ? this.model.sampleAt(band.positionMeters) : this.model.sampleAtRadius(band.positionMeters);
       const magnitude = peakPressure > 0 ? Math.min(1, Math.abs(sample.pressure) / peakPressure) : 0;
-      const alpha = maxAlpha * magnitude;
+      const alpha = SUBTLE_MAX_ALPHA * magnitude;
       const rgb = sample.pressure >= 0 ? COMPRESSION_RGB : RAREFACTION_RGB;
       // toFixed(6), NOT the bare number: `magnitude` passes arbitrarily close to 0 every time pressure
       // crosses zero (twice per cycle), and JS's default Number-to-string switches to exponential
@@ -240,12 +239,12 @@ export class PressureFieldNode extends Node {
     }
   }
 
-  /** 'pedagogical' mode (V3 addition) - discrete tonal bands (PEDAGOGICAL_TIER_COUNT tiers), a dual-
-   * channel (alpha AND lightness) encoding per tier, a hard-edged wavefront boundary, and a legibility
-   * floor - see the constants' own comments above for the full reasoning behind each. Always renders at
-   * PROMINENT-style boldness regardless of showPressureFieldProperty - see ControlPanel.ts's disabled
-   * "Show pressure field" checkbox in this mode, since that opt-in tier would otherwise be a no-op here. */
-  private redrawPedagogical(): void {
+  /** Color-on rendering - discrete tonal bands (COLOR_TIER_COUNT tiers), a dual-channel (alpha AND
+   * lightness) encoding per tier, a hard-edged wavefront boundary, and a legibility floor - see the
+   * constants' own comments above for the full reasoning behind each. Always renders at this bold,
+   * discrete presentation regardless of anything else - there is no separate "boost" checkbox any more
+   * (see the class doc's Color tier paragraph). */
+  private redrawColor(): void {
     const peakPressure = this.estimatePeakPressure();
 
     for (const band of this.bands) {
@@ -257,23 +256,23 @@ export class PressureFieldNode extends Node {
         // sampleAtRetardedDistance()'s own early return in SoundWavesModel.ts) - stays EXACTLY neutral,
         // NEVER floored, so the wavefront's own real physical edge (free, already present in the retarded-
         // time computation) reads as the sharpest possible boundary: "nothing" right next to "at least tier
-        // 0", with no soft blend at this one specific edge (contrast PEDAGOGICAL_BAND_BLEND_FRACTION's
-        // internal-tier-boundary blending, which is deliberately NOT applied here).
+        // 0", with no soft blend at this one specific edge (contrast COLOR_BAND_BLEND_FRACTION's internal-
+        // tier-boundary blending, which is deliberately NOT applied here).
         this.applyBandPaint(band, "rgba(0, 0, 0, 0)");
         continue;
       }
 
       const rgb = sample.pressure >= 0 ? COMPRESSION_RGB : RAREFACTION_RGB;
-      this.applyBandPaint(band, pedagogicalTierColor(magnitude, rgb));
+      this.applyBandPaint(band, colorTierColor(magnitude, rgb));
     }
   }
 
   /** Applies `color` as the paint for one band - a Rectangle's FILL in plane mode, a Circle's STROKE in
    * spherical mode (the ring's outline IS how a spherical "band" is drawn - see the class doc's SPHERICAL
    * mode paragraph - so this is not an "outline added on top of a fill"; neither mode ever adds a separate
-   * stroke/outline distinct from the band's own paint, in either representation mode, per the design
-   * review's "fill/alpha only" requirement). Shared by redrawReal()/redrawPedagogical() so the two tiers
-   * can never accidentally diverge in HOW a band's paint is applied, only in what color they compute. */
+   * stroke/outline distinct from the band's own paint, in either rendering. Shared by redrawSubtle()/
+   * redrawColor() so the two tiers can never accidentally diverge in HOW a band's paint is applied, only
+   * in what color they compute. */
   private applyBandPaint(band: Band, color: string): void {
     if (this.currentMode === "plane") {
       (band.shape as Rectangle).fill = color;

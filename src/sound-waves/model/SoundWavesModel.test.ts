@@ -370,6 +370,56 @@ describe("retarded-time / finite propagation speed", () => {
   });
 });
 
+describe("getWavefrontDistance", () => {
+  it("stays at 0 before any stepping", () => {
+    const model = new SoundWavesModel();
+    expect(model.getWavefrontDistance()).toBe(0);
+  });
+
+  it("advances as speedOfSound * elapsed time, matching sampleAt's own at-rest/active boundary exactly", () => {
+    const model = new SoundWavesModel();
+    const dt = 1 / 2000;
+    const steps = 500; // 0.25 s of model time
+    for (let i = 0; i < steps; i++) {
+      model.step(dt);
+    }
+
+    const expectedDistance = model.speedOfSoundProperty.value * (steps * dt);
+    expect(model.getWavefrontDistance()).toBeCloseTo(expectedDistance, 6);
+
+    // Consistency check against the model's OWN physical definition of "has the wavefront arrived",
+    // not just the formula in isolation: a point just short of the wavefront distance must already be
+    // active (though possibly still ramping in), and a point just beyond it must be exactly at rest
+    // (retardedTime<=0 in sampleAtRetardedDistance's own gating - see the class doc).
+    const distance = model.getWavefrontDistance();
+    const wellBefore = model.sampleAt(distance - 1); // comfortably past the ramp-in, unambiguously active
+    const justBeyond = model.sampleAt(distance + 0.01);
+    expect(justBeyond).toEqual({ displacement: 0, velocity: 0, pressure: 0 });
+    expect(wellBefore).not.toEqual({ displacement: 0, velocity: 0, pressure: 0 });
+  });
+
+  it("is identical in spherical mode - both modes share the same underlying clock", () => {
+    const model = new SoundWavesModel();
+    model.propagationModeProperty.value = "spherical";
+    const dt = 1 / 2000;
+    for (let i = 0; i < 300; i++) {
+      model.step(dt);
+    }
+
+    const distance = model.getWavefrontDistance();
+    expect(model.sampleAtRadius(distance + 0.01)).toEqual({ displacement: 0, velocity: 0, pressure: 0 });
+  });
+
+  it("resets to 0 along with the rest of the model's clock state", () => {
+    const model = new SoundWavesModel();
+    model.step(0.05);
+    expect(model.getWavefrontDistance()).toBeGreaterThan(0);
+
+    model.reset();
+    expect(model.getWavefrontDistance()).toBe(0);
+  });
+});
+
 describe("play/pause freezes the whole simulation", () => {
   it("stepping while paused does not change the sampled arrays", () => {
     const model = new SoundWavesModel();
