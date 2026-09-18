@@ -140,6 +140,18 @@ export class ControlPanel extends Panel {
       accessibleName: "Color",
       accessibleHelpText: "Shades the particles and the background more boldly, in discrete bands by compression (red) and rarefaction (blue), to make the wave easier to see at a glance.",
     });
+    // PEDAGOGY-REVIEW FIX: every other opt-in checkbox in this panel (pressureGraphCheckbox,
+    // rulerCheckbox, compressionTrackerCheckbox, wavefrontCheckbox below) has a visible on-screen caption
+    // under it; colorCheckbox was the one exception, so a sighted student never saw any caveat (only
+    // accessibleHelpText carried one, for screen-reader users only). That matters here specifically
+    // because Color's discrete, hard-bounded color tiers can otherwise read as "pressure changes in
+    // quantized steps" - which is physically wrong (pressure is continuous; the banding is a display
+    // choice) - the same caveat the removed RepresentationModeControl used to state explicitly.
+    const colorCaption = new RichText("Same wave, shown more boldly - this doesn't change the physics.", {
+      font: CAPTION_FONT,
+      fill: "#707070",
+      lineWrap: PANEL_WIDTH - 20,
+    });
 
     // V3: this sim's own 3-way PlaybackSpeedControl (Normal/Slow/Ultra Slow) replaces TimeControlNode's
     // built-in speed radio group entirely - scenery-phet's TimeSpeed enum is closed (FAST/NORMAL/SLOW
@@ -166,7 +178,7 @@ export class ControlPanel extends Panel {
       align: "left",
       children: [
         frequencyControl,
-        new VBox({ spacing: 2, align: "left", children: [amplitudeControl, sphericalAmplitudeControl, amplitudeCaption, colorCheckbox] }),
+        new VBox({ spacing: 2, align: "left", children: [amplitudeControl, sphericalAmplitudeControl, amplitudeCaption, colorCheckbox, colorCaption] }),
         // Kept visually grouped together (play/pause/step/reset + speed), per the reviewed interaction
         // design - not split across unrelated sections of the panel.
         new VBox({ spacing: 8, align: "left", children: [timeControlNode, playbackSpeedControl] }),

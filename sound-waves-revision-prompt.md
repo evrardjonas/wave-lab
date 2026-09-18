@@ -30,6 +30,47 @@ pour chaque point) :
   publication existait localement) ; 4 nouveaux tests unitaires pour
   `getWavefrontDistance()`.
 
+**Round 2 (2026-09-18, même jour) : vraie revue indépendante via
+`scenery-developer`/`physics-reviewer`/`pedagogy-reviewer`/`qa-tester`**,
+lancée depuis un terminal séparé où le CLI Claude Code reconnaît bien les
+agents/skill de ce projet (contrairement à la session qui a fait le round 1).
+Deux must-fix trouvés et corrigés sur le commit `56430de` :
+
+1. **Ruler mal calibré en mode Spherical** (physics-reviewer, bug réel que
+   je n'avais pas vu) — le ruler était dimensionné avec
+   `pixelsPerMeterForZoom()` (l'échelle Plane) même en mode Spherical, alors
+   que le champ de particules et les anneaux de compression utilisent
+   `sphericalPixelsPerMeterForZoom()` (420px vs 600px de diamètre de champ)
+   → sous-lecture silencieuse de 30% de toute distance mesurée en mode
+   Spherical, aux deux zooms. Préexistant pour le zoom Local (pas introduit
+   par ce commit), mais étendu par erreur au nouveau ruler Field lors du
+   round 1. **Corrigé** : 4 instances de `RulerNode` au lieu de 2 (une par
+   couple zoom×mode), avec calibrage dédié pour Spherical
+   (`SPHERICAL_RULER_METERS`/`SPHERICAL_FIELD_RULER_METERS` dans
+   [SoundWavesScreenView.ts](src/sound-waves/view/SoundWavesScreenView.ts)).
+2. **Case "Color" sans légende visible** (pedagogy-reviewer) — seule case
+   du panneau sans texte explicatif à l'écran, alors que son rendu par
+   paliers nets pouvait laisser croire à une pression physiquement
+   quantifiée. **Corrigé** : ajout de `colorCaption` ("Same wave, shown
+   more boldly - this doesn't change the physics.") dans
+   [ControlPanel.ts](src/sound-waves/view/ControlPanel.ts), même pattern
+   que les autres cases.
+
+Revérifié indépendamment (moi, après coup) : lecture directe du code
+final, `tsc`/`eslint`/`build`/`vitest` (64/64) à nouveau verts, **et
+vérification visuelle en navigateur des deux nouveaux rulers Spherical**
+(chose que la session du round 2 n'a pas pu faire, faute de navigateur
+connecté chez elle) - les labels et le calibrage rendent correctement aux
+deux zooms.
+
+Laissé de côté (nice-to-have, pas must-fix) : pas d'anneaux-repères dans le
+champ de particules en Spherical+Field (perte d'un indice visuel
+Plane/Spherical à ce zoom précis) ; renommer "Color" en quelque chose de
+plus descriptif ; commentaires obsolètes référençant l'ancien
+`RepresentationModeControl` ailleurs dans `SoundWavesScreenView.ts` ;
+`dragBoundsProperty` du ruler n'exclut pas sa propre largeur (pattern
+préexistant, pas introduit ici) ; eslint sur `scripts/*.mjs` (sans rapport).
+
 **Décisions prises (2026-09-18, confirmées par l'utilisateur) :**
 - Implémenter maintenant, pas juste remettre un prompt.
 - Le futur bouton « Color » (section D) **remplace** la case « Show pressure

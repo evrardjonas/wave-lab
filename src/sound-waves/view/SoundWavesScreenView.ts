@@ -4,7 +4,7 @@ import { DragListener, KeyboardDragListener } from "scenerystack/scenery";
 import { ScreenView, ScreenViewOptions } from "scenerystack/sim";
 import { InfoButton, ResetAllButton, RulerNode } from "scenerystack/scenery-phet";
 import { SoundWavesModel } from "../model/SoundWavesModel.js";
-import { ParticleFieldNode, pixelsPerMeterForZoom, type ViewZoom } from "./ParticleFieldNode.js";
+import { ParticleFieldNode, pixelsPerMeterForZoom, sphericalPixelsPerMeterForZoom, type ViewZoom } from "./ParticleFieldNode.js";
 import { LoudspeakerNode, PointSourceNode } from "./LoudspeakerNode.js";
 import { PressureGraphNode } from "./PressureGraphNode.js";
 import { PressureFieldNode } from "./PressureFieldNode.js";
@@ -102,8 +102,16 @@ const TOP_CHROME_ROW_GAP = 6; // px, vertical gap between the two top chrome row
 // toggled by visibility exactly like the two Amplitude NumberControls above - not a single ruler hidden
 // outright at Field zoom, which is what this used to do (a real measuring tool should work at whichever
 // zoom the student is looking at, not just one).
-
-const RULER_WIDTH = pixelsPerMeterForZoom("local"); // px, represents exactly 1 m at Local zoom's scale.
+//
+// PHYSICS-REVIEW FIX: pixelsPerMeterForZoom() is the PLANE-wave px/m scale. ParticleFieldNode/
+// PressureFieldNode/CompressionTrackerNode all switch to sphericalPixelsPerMeterForZoom() (a DIFFERENT,
+// smaller px/m - SPHERICAL_FIELD_PIXEL_WIDTH=420 vs FIELD_PIXEL_WIDTH=600, see ParticleFieldNode.ts) while
+// in Spherical propagation mode, but the ruler below used to be built off pixelsPerMeterForZoom() alone
+// regardless of mode - so in Spherical mode it silently under-read every distance by a constant 420/600 =
+// 0.70x, at both zooms (e.g. a true 1.00 m compression-ring spacing read as "0.70 m"). Fixed the same way
+// the Amplitude control's mode-mismatch bug was fixed above: build a SEPARATE, correctly-calibrated ruler
+// per (zoom, mode) pair - 4 RulerNode instances total - rather than trying to re-scale one instance.
+const RULER_WIDTH = pixelsPerMeterForZoom("local"); // px, represents exactly 1 m at Local zoom's Plane scale.
 // 20 cm major ticks (not 10 cm, unlike Standing Waves' ruler) because PIXELS_PER_METER_X is smaller here
 // (150 vs Standing Waves' 320, since this sim's domain is several meters, not ~1-2m), so 10 cm ticks
 // would only be 15px apart - too narrow for RulerNode to fit a tick label plus the "cm" units label (it
@@ -118,6 +126,23 @@ const RULER_MAJOR_TICK_SPACING = RULER_WIDTH / 5; // px, represents 20 cm
 const FIELD_RULER_METERS = 5;
 const FIELD_RULER_WIDTH = pixelsPerMeterForZoom("field") * FIELD_RULER_METERS; // px
 const FIELD_RULER_MAJOR_TICK_SPACING = FIELD_RULER_WIDTH / FIELD_RULER_METERS; // px, represents 1 m
+
+// Spherical-mode versions of the above, built off sphericalPixelsPerMeterForZoom() instead of
+// pixelsPerMeterForZoom() so they read true distances correctly in Spherical mode (see the PHYSICS-REVIEW
+// FIX comment above). Spherical's px/m is smaller than Plane's at both zooms (420/600 = 0.7x), so simply
+// reusing the Plane rulers' tick-count/span would give tick spacing well under the ~30px minimum that's
+// already proven necessary above (e.g. 20 cm ticks at Local's spherical scale would only be 21px apart) -
+// so these use a coarser physical span per major tick instead, chosen to land comfortably at or above that
+// same ~30px minimum while keeping round, easy-to-read tick values.
+const SPHERICAL_RULER_METERS = 2; // 50 cm major ticks over a 2 m span (vs. Plane Local's 20 cm over 1 m)
+const SPHERICAL_RULER_TICK_METERS = 0.5;
+const SPHERICAL_RULER_WIDTH = sphericalPixelsPerMeterForZoom("local") * SPHERICAL_RULER_METERS; // px, = 210
+const SPHERICAL_RULER_MAJOR_TICK_SPACING = SPHERICAL_RULER_WIDTH / (SPHERICAL_RULER_METERS / SPHERICAL_RULER_TICK_METERS); // px, = 52.5, represents 50 cm
+
+const SPHERICAL_FIELD_RULER_METERS = 8; // 2 m major ticks over an 8 m span (vs. Plane Field's 1 m over 5 m)
+const SPHERICAL_FIELD_RULER_TICK_METERS = 2;
+const SPHERICAL_FIELD_RULER_WIDTH = sphericalPixelsPerMeterForZoom("field") * SPHERICAL_FIELD_RULER_METERS; // px, = 210
+const SPHERICAL_FIELD_RULER_MAJOR_TICK_SPACING = SPHERICAL_FIELD_RULER_WIDTH / (SPHERICAL_FIELD_RULER_METERS / SPHERICAL_FIELD_RULER_TICK_METERS); // px, = 52.5, represents 2 m
 
 // Minimum horizontal gap (px) between ZoomControl's right edge and the ruler's default left edge (QA
 // re-review: the old hardcoded default x left only a "razor-thin at best" gap here - see the ruler's own
@@ -337,31 +362,66 @@ export class SoundWavesScreenView extends ScreenView {
     // error here would only affect its non-colliding DEFAULT position, not correctness.
     this.rulerPositionProperty = new Vector2Property(new Vector2(zoomControl.right + RULER_HORIZONTAL_MARGIN, 138));
     const rulerDragBoundsProperty = new Property(this.layoutBounds.eroded(10));
-    // SHARED position/drag-bounds across both zoom levels' RulerNode instances (see the section comment
-    // above) - dragging one, then switching zoom, leaves the ruler at the same SCREEN position rather
-    // than resetting it, which is what a student would expect ("the ruler" staying put as a single tool,
-    // even though which underlying Node represents it changes).
-    const localRulerVisibleProperty = new DerivedProperty([this.showRulerProperty, this.viewZoomProperty], (show, zoom) => show && zoom === "local");
-    const fieldRulerVisibleProperty = new DerivedProperty([this.showRulerProperty, this.viewZoomProperty], (show, zoom) => show && zoom === "field");
+    // SHARED position/drag-bounds across all (zoom x mode) RulerNode instances (see the section comment
+    // above) - dragging one, then switching zoom or mode, leaves the ruler at the same SCREEN position
+    // rather than resetting it, which is what a student would expect ("the ruler" staying put as a single
+    // tool, even though which underlying Node represents it changes).
+    //
+    // Visibility is gated on BOTH zoom AND propagationModeProperty (not just zoom) because each mode needs
+    // its own differently-calibrated RulerNode instance (see the PHYSICS-REVIEW FIX comment above) -
+    // exactly one of the four is ever visible at a time.
+    const localPlaneRulerVisibleProperty = new DerivedProperty(
+      [this.showRulerProperty, this.viewZoomProperty, model.propagationModeProperty],
+      (show, zoom, mode) => show && zoom === "local" && mode === "plane",
+    );
+    const localSphericalRulerVisibleProperty = new DerivedProperty(
+      [this.showRulerProperty, this.viewZoomProperty, model.propagationModeProperty],
+      (show, zoom, mode) => show && zoom === "local" && mode === "spherical",
+    );
+    const fieldPlaneRulerVisibleProperty = new DerivedProperty(
+      [this.showRulerProperty, this.viewZoomProperty, model.propagationModeProperty],
+      (show, zoom, mode) => show && zoom === "field" && mode === "plane",
+    );
+    const fieldSphericalRulerVisibleProperty = new DerivedProperty(
+      [this.showRulerProperty, this.viewZoomProperty, model.propagationModeProperty],
+      (show, zoom, mode) => show && zoom === "field" && mode === "spherical",
+    );
 
+    const rulerHelpText = "Drag to measure distances along the domain, such as the spacing between two compressions.";
     const localRulerNode = new RulerNode(RULER_WIDTH, 36, RULER_MAJOR_TICK_SPACING, ["0", "20", "40", "60", "80", "100"], "cm", {
-      visibleProperty: localRulerVisibleProperty,
+      visibleProperty: localPlaneRulerVisibleProperty,
       tagName: "div",
       focusable: true,
       accessibleName: "Ruler",
-      accessibleHelpText: "Drag to measure distances along the domain, such as the spacing between two compressions.",
+      accessibleHelpText: rulerHelpText,
       cursor: "pointer",
     });
     const fieldRulerNode = new RulerNode(FIELD_RULER_WIDTH, 36, FIELD_RULER_MAJOR_TICK_SPACING, ["0", "1", "2", "3", "4", "5"], "m", {
-      visibleProperty: fieldRulerVisibleProperty,
+      visibleProperty: fieldPlaneRulerVisibleProperty,
       tagName: "div",
       focusable: true,
       accessibleName: "Ruler",
-      accessibleHelpText: "Drag to measure distances along the domain, such as the spacing between two compressions.",
+      accessibleHelpText: rulerHelpText,
+      cursor: "pointer",
+    });
+    const localSphericalRulerNode = new RulerNode(SPHERICAL_RULER_WIDTH, 36, SPHERICAL_RULER_MAJOR_TICK_SPACING, ["0", "50", "100", "150", "200"], "cm", {
+      visibleProperty: localSphericalRulerVisibleProperty,
+      tagName: "div",
+      focusable: true,
+      accessibleName: "Ruler",
+      accessibleHelpText: rulerHelpText,
+      cursor: "pointer",
+    });
+    const fieldSphericalRulerNode = new RulerNode(SPHERICAL_FIELD_RULER_WIDTH, 36, SPHERICAL_FIELD_RULER_MAJOR_TICK_SPACING, ["0", "2", "4", "6", "8"], "m", {
+      visibleProperty: fieldSphericalRulerVisibleProperty,
+      tagName: "div",
+      focusable: true,
+      accessibleName: "Ruler",
+      accessibleHelpText: rulerHelpText,
       cursor: "pointer",
     });
 
-    for (const ruler of [localRulerNode, fieldRulerNode]) {
+    for (const ruler of [localRulerNode, fieldRulerNode, localSphericalRulerNode, fieldSphericalRulerNode]) {
       ruler.translation = this.rulerPositionProperty.value;
       this.rulerPositionProperty.link((position) => {
         ruler.translation = position;
@@ -403,6 +463,8 @@ export class SoundWavesScreenView extends ScreenView {
       infoButton,
       localRulerNode,
       fieldRulerNode,
+      localSphericalRulerNode,
+      fieldSphericalRulerNode,
       resetAllButton,
     ];
   }
