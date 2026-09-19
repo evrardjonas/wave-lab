@@ -197,14 +197,33 @@ export class PressureGraphNode extends Node {
 
     this.children = [chartRectangle, this.compressionPlot, this.rarefactionPlot, zeroLine, this.boatGuideLine, this.boat, yAxisLabel, this.zeroLabel, caption];
 
+    // BUG FIX: this used to scale the axis to the CURRENT amplitudeProperty.value, which makes the axis
+    // grow/shrink in exact proportion to amplitude - the plotted curve (itself proportional to amplitude)
+    // then always fills the SAME fraction of the chart no matter what amplitude is set to, so raising or
+    // lowering the Amplitude control produced a visually IDENTICAL graph (the amplitude term cancels
+    // out of peakPressure/axisBound algebraically). Anchoring instead to the amplitude control's own
+    // current MAX (amplitudeProperty.rangeProperty, the safety-bound Range already used to size the
+    // slider itself - see SoundWavesModel.ts's computeAmplitudeRange()) gives a FIXED reference scale, so
+    // the live amplitude value now visibly grows/shrinks the curve toward/away from that fixed ceiling,
+    // the same way PressureFieldNode.ts's estimatePeakPressure() is fixed alongside this one.
+    //
+    // NOTE (physics-reviewed): in PLANE mode this ceiling is, by construction, an exact CONSTANT
+    // independent of frequency - computeAmplitudeRange()'s max is AMPLITUDE_SAFETY_FRACTION*c/omega, so
+    // the omega factor here cancels it exactly, leaving AMPLITUDE_SAFETY_FRACTION*AIR_DENSITY*c^2. The
+    // Range object itself is frequency-dependent (it's what makes the Amplitude slider's max shrink as
+    // frequency rises), but the resulting PEAK PRESSURE is not - don't mistake that for a bug if you
+    // notice dragging Frequency alone never moves this axis. (Spherical mode's equivalent in
+    // PressureFieldNode.ts does NOT have this cancellation - its ceiling genuinely varies with frequency,
+    // per strictRadialAmplitudeBound's own doc comment.)
     const updateAxisRange = (): void => {
       const speedOfSound = model.speedOfSoundProperty.value;
-      const peakPressure = AIR_DENSITY * speedOfSound * angularFrequency(model.frequencyProperty.value) * model.amplitudeProperty.value;
+      const maxAmplitude = model.amplitudeProperty.rangeProperty.value.max;
+      const peakPressure = AIR_DENSITY * speedOfSound * angularFrequency(model.frequencyProperty.value) * maxAmplitude;
       const bound = Math.max(1e-6, peakPressure * AXIS_PADDING_FACTOR);
       this.chartTransform.setModelYRange(new Range(-bound, bound));
       this.zeroLabel.centerY = this.chartTransform.modelToViewY(0) - 8;
     };
-    Multilink.multilink([model.frequencyProperty, model.amplitudeProperty, model.speedOfSoundProperty], updateAxisRange);
+    Multilink.multilink([model.frequencyProperty, model.amplitudeProperty.rangeProperty, model.speedOfSoundProperty], updateAxisRange);
 
     // Zoom-driven rebuild (modelXRange + cached sample grid + the boat/guide line's fixed x) - separate from
     // updateAxisRange above (the Y range is about pressure amplitude, not zoom) and from the per-frame

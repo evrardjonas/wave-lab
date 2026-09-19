@@ -281,15 +281,35 @@ export class PressureFieldNode extends Node {
     }
   }
 
-  /** Upper bound on |pressure| across the domain at the CURRENT frequency/amplitude, used only to
-   * normalize shading intensity to 0..1 - mirrors PressureGraphNode.ts's own axis-scaling estimate
-   * (AIR_DENSITY * c * omega * amplitude), evaluated with whichever amplitude applies to the active
-   * mode (the plane wave's constant amplitude, or the spherical wave's amplitude AT the source radius -
-   * its largest value anywhere in the field, since amplitude only decreases with r from there). */
+  /** Upper bound on |pressure| across the domain at the CURRENT frequency, used only to normalize shading
+   * intensity to 0..1 - mirrors PressureGraphNode.ts's own axis-scaling estimate (AIR_DENSITY * c * omega
+   * * amplitude).
+   *
+   * BUG FIX: this used to read the LIVE amplitudeProperty/sphericalAmplitudeProperty value here, which
+   * makes this bound scale in exact proportion to amplitude - since the sampled pressure fed into
+   * `magnitude = |pressure| / peakPressure` in redrawSubtle()/redrawColor() is ALSO exactly proportional
+   * to that same amplitude, the amplitude term cancels out of `magnitude` algebraically, so the shading
+   * always renders the SAME normalized intensity distribution no matter what amplitude is set to -
+   * raising or lowering the Amplitude control produced visually IDENTICAL shading. Anchoring instead to
+   * the relevant amplitude control's own current MAX (amplitudeProperty.rangeProperty / sphericalAmpli-
+   * tudeProperty.rangeProperty, the safety-bound Range already used to size each slider - see
+   * SoundWavesModel.ts's computeAmplitudeRange()/computeSphericalAmplitudeRange()) gives a FIXED
+   * reference, so the live amplitude value now visibly changes how much of the tier range - or, in
+   * Color-off mode, how dark the continuous tint gets - the shading reaches. Read fresh every frame
+   * (redrawSubtle()/redrawColor() call this every step()), so no separate Multilink wiring is needed the
+   * way PressureGraphNode.ts's axis range requires.
+   *
+   * NOTE (physics-reviewed) - the two modes behave differently here, deliberately: in PLANE mode this
+   * ceiling is an exact CONSTANT independent of frequency (see PressureGraphNode.ts's matching note - the
+   * omega and 1/omega terms cancel exactly), so dragging Frequency alone never shifts the shading. In
+   * SPHERICAL mode it does NOT cancel (strictRadialAmplitudeBound has an uncancelled 1/sourceRadius term
+   * that only becomes negligible at high frequency, approaching the plane-wave ceiling in that limit) -
+   * so in Spherical mode, changing Frequency alone DOES visibly shift the shading's saturation, which is
+   * real physics (the maximum achievable pressure at a given frequency genuinely changes), not a bug. */
   private estimatePeakPressure(): number {
     const speedOfSound = this.model.speedOfSoundProperty.value;
     const omega = angularFrequency(this.model.frequencyProperty.value);
-    const amplitude = this.currentMode === "plane" ? this.model.amplitudeProperty.value : this.model.sphericalAmplitudeProperty.value;
-    return AIR_DENSITY * speedOfSound * omega * amplitude;
+    const maxAmplitude = this.currentMode === "plane" ? this.model.amplitudeProperty.rangeProperty.value.max : this.model.sphericalAmplitudeProperty.rangeProperty.value.max;
+    return AIR_DENSITY * speedOfSound * omega * maxAmplitude;
   }
 }
