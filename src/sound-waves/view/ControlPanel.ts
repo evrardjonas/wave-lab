@@ -128,7 +128,26 @@ export class ControlPanel extends Panel {
       font: CAPTION_FONT,
       fill: "#707070",
       lineWrap: PANEL_WIDTH - 20,
+      visibleProperty: isPlaneModeProperty,
     });
+    // PEDAGOGY + PHYSICS REVIEW FIX: Spherical mode's particle motion is boosted by a SECOND, independent
+    // exaggeration beyond the shared caption above's "shown much larger" - ParticleFieldNode.ts's
+    // redrawSpherical() also flattens the true 1/r amplitude decay to a gentler displayed ~1/sqrt(r) (see
+    // that file's "Spherical-mode-only visual displacement boost" section comment), so particle wiggle
+    // fades noticeably more slowly with distance than the background pressure color does (which keeps the
+    // true 1/r falloff, unmodified). Without disclosing this, a student comparing the two channels could
+    // read the mismatch as "sound barely weakens with distance" or as the two displays contradicting each
+    // other. This caption is Spherical-mode-only (the Plane-mode caption above never mentions distance,
+    // since Plane's amplitude doesn't depend on position at all).
+    const sphericalAmplitudeCaption = new RichText(
+      "Particle motion is shown much larger than real sound waves, and fades more gently with distance than real sound does, so it stays visible far from the source. The color/shading behind it shows the true, steeper fall-off.",
+      {
+        font: CAPTION_FONT,
+        fill: "#707070",
+        lineWrap: PANEL_WIDTH - 20,
+        visibleProperty: isSphericalModeProperty,
+      },
+    );
 
     // "Color" - the one control for the bolder, discrete-tier rendering (see ParticleFieldNode.ts's
     // "Color mode" doc comment and PressureFieldNode.ts's redrawColor()). Placed next to Amplitude, not
@@ -178,7 +197,7 @@ export class ControlPanel extends Panel {
       align: "left",
       children: [
         frequencyControl,
-        new VBox({ spacing: 2, align: "left", children: [amplitudeControl, sphericalAmplitudeControl, amplitudeCaption, colorCheckbox, colorCaption] }),
+        new VBox({ spacing: 2, align: "left", children: [amplitudeControl, sphericalAmplitudeControl, amplitudeCaption, sphericalAmplitudeCaption, colorCheckbox, colorCaption] }),
         // Kept visually grouped together (play/pause/step/reset + speed), per the reviewed interaction
         // design - not split across unrelated sections of the panel.
         new VBox({ spacing: 8, align: "left", children: [timeControlNode, playbackSpeedControl] }),

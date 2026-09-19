@@ -194,6 +194,74 @@ function computeFieldGridSide(spanMeters: number, minWavelength: number): number
   return clamp(raw, MIN_FIELD_GRID_SIDE, MAX_FIELD_GRID_SIDE);
 }
 
+// ---- Spherical-mode-only visual displacement boost ----
+//
+// Real user testing found Spherical mode's particle motion effectively invisible almost everywhere:
+// sphericalAmplitudeProperty's own safety cap (strictRadialAmplitudeBound) is already ~3.5x stricter than
+// the plane wave's (strictAmplitudeBound), and on top of that, amplitude decays as r0/r away from the
+// source (see sphericalAmplitudeAtRadius() in SoundWavesModel.ts) - by the outer edge of the visible field
+// (r = maxRadiusMeters, up to 8m at Field zoom vs. a 0.15m source radius), raw displacement rounds to a
+// small fraction of a pixel even at maximum amplitude, so "the wave" visually never appears to reach or
+// move anything out there, even though the underlying physics is computed correctly (confirmed by direct
+// measurement: raw peak pixel excursion at the Field-zoom edge is ~0.03px at max amplitude).
+//
+// A single FLAT multiplier can't fix this without a new problem: the dynamic range between the source
+// (strongest) and the edge (weakest, ~13x-53x smaller depending on zoom) is too large - a flat boost big
+// enough to make the EDGE visible would send SOURCE-adjacent particles flying many tens of pixels past
+// their equilibrium, badly overshooting the layout margins reserved around the fixed 210px field radius
+// (see SPHERICAL_FIELD_PIXEL_WIDTH's own comment) and the ~37px top-chrome clearance in
+// SoundWavesScreenView.ts.
+//
+// Fix: partially flatten the 1/r decay for DISPLAY only (never touching the model's own physics, which
+// PressureFieldNode.ts/CompressionTrackerNode.ts still render with the true, unflattened r0/r falloff) by
+// multiplying the model's already-computed displacement by sqrt(r/SPHERICAL_SOURCE_RADIUS) - this turns
+// the NET visual decay from 1/r into 1/sqrt(r): still weaker further from the source (preserves the
+// qualitative "waves fade with distance" lesson, and stays visually consistent with the pressure shading,
+// which keeps the true 1/r falloff), but nowhere near as steep, so the edge remains perceptible instead of
+// rounding to zero pixels.
+//
+// This compensation factor equals exactly 1 at r=SPHERICAL_SOURCE_RADIUS (no boost needed AT the source -
+// see computeSphericalBaseScale()'s own doc comment for the ceiling this sets up), and grows for
+// r > SPHERICAL_SOURCE_RADIUS - never shrinks below 1, so it can only ever add visibility, never make
+// anything LESS visible than the unboosted physical value.
+const SPHERICAL_VISUAL_TARGET_NEAR_SOURCE_PX = 12; // px, see computeSphericalBaseScale()'s doc
+
+/**
+ * Returns the flat (radius-independent) part of the visual displacement boost - see
+ * SPHERICAL_VISUAL_TARGET_NEAR_SOURCE_PX's own comment above for why a flat boost alone isn't enough; this
+ * is combined with the per-particle sqrt(r/SPHERICAL_SOURCE_RADIUS) decay compensation at each call site.
+ * Depends only on maxSourceAmplitude/pixelsPerMeter (both frame-constant, not per-particle), so callers
+ * compute this ONCE per redrawSpherical() call, not once per particle.
+ *
+ * WORST-CASE PIXEL EXCURSION (physics-reviewed): let Amax = sphericalAmplitudeProperty.rangeProperty.value
+ * .max (the current frequency's cap) and r0 = SPHERICAL_SOURCE_RADIUS. At the live amplitude's own worst
+ * case (A=Amax), the pixel excursion at radius r works out to max(Amax*pixelsPerMeter, TARGET) *
+ * sqrt(r0/r) (both branches of this function's own max(1, ...) clause included) - so the excursion AT THE
+ * SOURCE (r=r0, where sqrt(r0/r)=1, the largest this ever gets) is max(Amax*pixelsPerMeter, TARGET), NOT
+ * unconditionally TARGET. TARGET only bounds it when Amax*pixelsPerMeter <= TARGET; otherwise this
+ * function returns baseScale=1 (no boost applied) and the excursion is simply whatever the RAW physical
+ * amplitude already was - i.e. exactly what redrawSpherical() would have drawn before this boost existed,
+ * so that branch introduces no NEW margin risk of its own.
+ * Checked against this sim's actual constants (AMPLITUDE_SAFETY_FRACTION=0.7, SPHERICAL_SOURCE_RADIUS=
+ * 0.15m, FREQUENCY_RANGE=[100,500]Hz, SPHERICAL_FIELD_PIXEL_WIDTH=420px): Amax*pixelsPerMeter's own
+ * maximum across every (frequency, zoom) combination is ~8.65px (100Hz, Local zoom) - comfortably under
+ * TARGET=12px - so today TARGET genuinely is the live ceiling everywhere. This is NOT a general
+ * mathematical guarantee, though: if SPHERICAL_FIELD_PIXEL_WIDTH, AMPLITUDE_SAFETY_FRACTION,
+ * FREQUENCY_RANGE.min, or SPHERICAL_SOURCE_RADIUS ever change, re-check that Amax*pixelsPerMeter stays
+ * under TARGET_PX at FREQUENCY_RANGE's most permissive end (lowest frequency, largest amplitude cap) -
+ * that's the only way this ceiling could silently stop holding.
+ */
+function computeSphericalBaseScale(maxSourceAmplitude: number, pixelsPerMeter: number): number {
+  return maxSourceAmplitude > 0 ? Math.max(1, SPHERICAL_VISUAL_TARGET_NEAR_SOURCE_PX / (maxSourceAmplitude * pixelsPerMeter)) : 1;
+}
+
+/** Per-particle decay-compensation factor - see the "Spherical-mode-only visual displacement boost"
+ * section comment above for why this specific curve (sqrt, not a full 1/r-cancelling r-proportional term)
+ * was chosen. Combine with computeSphericalBaseScale()'s (frame-constant) result by multiplying the two. */
+function sphericalDecayCompensation(radiusMeters: number): number {
+  return Math.sqrt(radiusMeters / SPHERICAL_SOURCE_RADIUS);
+}
+
 const TRACER_RADIUS = 5;
 const TRACER_FILL = "#e0592a";
 const TRACER_STROKE = "#8a3013";
@@ -759,9 +827,16 @@ export class ParticleFieldNode extends Node {
 
   private redrawSpherical(): void {
     const pixelsPerMeter = this.currentPixelsPerMeter;
+    // Read fresh every frame (matches PressureFieldNode.ts's estimatePeakPressure() precedent) rather than
+    // cached at rebuild() - rangeProperty.value.max tracks frequency live. baseScale doesn't depend on any
+    // one particle's radius, so it's computed ONCE here, not inside the per-particle loop below (only
+    // sphericalDecayCompensation(), which does depend on each particle's own radius, runs per particle).
+    const maxSourceAmplitude = this.model.sphericalAmplitudeProperty.rangeProperty.value.max;
+    const baseScale = computeSphericalBaseScale(maxSourceAmplitude, pixelsPerMeter);
     for (let i = 0; i < this.particles.length; i++) {
       const spec = this.sphericalSpecs[i];
-      const displacement = this.model.sampleAtRadius(spec.equilibriumRadiusMeters).displacement;
+      const rawDisplacement = this.model.sampleAtRadius(spec.equilibriumRadiusMeters).displacement;
+      const displacement = rawDisplacement * baseScale * sphericalDecayCompensation(spec.equilibriumRadiusMeters);
       // r-hat = (cos(angle), sin(angle)) is a FIXED unit vector, computed only from the particle's own
       // fixed equilibrium angle - never from anything time-varying - so displacement can only ever move
       // this particle radially, never tangentially (no possible path to apparent angular drift).
