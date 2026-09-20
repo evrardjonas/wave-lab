@@ -190,7 +190,19 @@ export class PressureFieldNode extends Node {
     } else {
       const maxRadiusMeters = VIEW_WIDTH_METERS[zoom] / 2;
       const ringWidthMeters = (maxRadiusMeters - SPHERICAL_SOURCE_RADIUS) / FIELD_SAMPLE_COUNT;
-      const ringWidthPx = Math.max(1, ringWidthMeters * pixelsPerMeter);
+      // User testing found spherical Color-mode shading reading as visibly softer/less saturated than
+      // plane mode's, despite both computing the same alpha/color values (colorTierColor()/SUBTLE_MAX_ALPHA
+      // are shared code, not mode-specific) - the difference is purely geometric: plane mode fills solid,
+      // mutually-adjacent Rectangles, while each spherical "band" is a thin (~2px) stroked Circle outline.
+      // At exactly the touching width (ringWidthMeters*pixelsPerMeter with no extra factor), adjacent rings'
+      // anti-aliased edges don't fully reach each ring's nominal alpha right at the boundary between them -
+      // repeated across FIELD_SAMPLE_COUNT=100 rings, that reads as an overall softer/hazier field than
+      // plane mode's crisp, contiguous rectangles. RING_OVERLAP_FACTOR widens each ring's stroke slightly
+      // beyond the exact touching width so adjacent rings overlap a bit, covering that seam - a pure
+      // rendering/geometry change (same per-radius pressure lookup, same FIELD_SAMPLE_COUNT resolution),
+      // not a change to any color/alpha value.
+      const RING_OVERLAP_FACTOR = 1.4;
+      const ringWidthPx = Math.max(1, ringWidthMeters * pixelsPerMeter * RING_OVERLAP_FACTOR);
       for (let i = 0; i < FIELD_SAMPLE_COUNT; i++) {
         const positionMeters = SPHERICAL_SOURCE_RADIUS + (i + 0.5) * ringWidthMeters;
         const radiusPx = positionMeters * pixelsPerMeter;

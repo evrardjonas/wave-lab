@@ -1,6 +1,6 @@
 import { Multilink } from "scenerystack/axon";
 import type { TReadOnlyProperty } from "scenerystack/axon";
-import { Circle, Node, Path } from "scenerystack/scenery";
+import { Circle, Line, Node, Path } from "scenerystack/scenery";
 import { Shape } from "scenerystack/kite";
 import { AIR_DENSITY, SPHERICAL_SOURCE_RADIUS, SoundWavesModel, angularFrequency, sphericalAmplitudeAtRadius } from "../model/SoundWavesModel.js";
 import { VIEW_WIDTH_METERS, pixelsPerMeterForZoom, sphericalPixelsPerMeterForZoom, type ViewZoom } from "./ParticleFieldNode.js";
@@ -59,9 +59,12 @@ const PEAK_THRESHOLD_FRACTION = 0.35;
 // where a solid, opaque, moving ring could otherwise be misread as a literal expanding "ripple from a
 // stone" - exactly the sim's own plain-language description of the wave itself (see
 // PropagationModeControl.ts's caption) - so a solid-filled shape here would send the wrong message. Same
-// warm-red hue family as PressureGraphNode's/PressureFieldNode's compression color (rgb 196,60,40) - only
-// the opacity/fill convention changes here, not the color identity.
-const MARKER_STROKE = "rgba(196, 60, 40, 0.75)";
+// UI REVIEW FIX: this used to share the same warm-red hue family as PressureGraphNode's/
+// PressureFieldNode's compression color (rgb 196,60,40) - user testing found that made the wavefront
+// marker too easy to confuse with the red compression shading right behind it. Switched to orange, a hue
+// used nowhere else in this sim's pressure/compression color language, so the marker (now labeled "Show
+// wavefront" - see ControlPanel.ts) reads as clearly its own thing at a glance, in both modes.
+const MARKER_STROKE = "rgba(230, 140, 20, 0.85)";
 const MARKER_LINE_WIDTH = 1.5;
 
 // Plane-mode marker: a small downward-pointing, OUTLINE-ONLY (unfilled - see MARKER_STROKE above)
@@ -78,12 +81,22 @@ const TRIANGLE_HEIGHT = 10; // px
 // down toward it.
 const TRIANGLE_Y_OFFSET = 70;
 
+// UI REVIEW FIX: plane mode's triangle used to be the only visual element for a marker - unlike spherical
+// mode's ring, which passes THROUGH the particle field at its radius, the triangle only ever sat above it,
+// with no visual tie to which particles below it corresponds to. Adding a dashed vertical guide line
+// (spanning the same +/-70px the removed WavefrontMarkerNode's own line used to, comfortably covering the
+// particle field's own +/-60px row span with a little margin) directly under each triangle gives plane
+// mode the same "a line marks this position across the field" read that spherical's dashed ring already
+// has, using the identical dash pattern (RING_LINE_DASH below) for visual consistency between modes.
+const MARKER_LINE_HALF_HEIGHT = 70; // px
+
 // Spherical-mode marker: a thin, DASHED ring at the compression's radius - dashed (rather than a solid
 // stroke) specifically so a moving ring can never be mistaken for a literal expanding wavefront/ripple;
 // combined with MARKER_STROKE's low alpha above, this keeps the marker clearly a bookkeeping overlay
 // rather than a new physical object, while still being visually distinct from PressureFieldNode's soft,
 // un-dashed alpha-shaded rings (this Node exists specifically to call out DISCRETE compressions, not
-// continuous shading).
+// continuous shading). Plane mode's own guide line (MARKER_LINE_HALF_HEIGHT above) reuses this same dash
+// pattern/width for consistency between modes.
 const RING_LINE_WIDTH = 2.5;
 const RING_LINE_DASH = [4, 3];
 
@@ -122,6 +135,7 @@ export class CompressionTrackerNode extends Node {
   private readonly sphericalOriginY: number;
 
   private readonly planeMarkers: Path[] = [];
+  private readonly planeMarkerLines: Line[] = [];
   private readonly sphericalMarkers: Circle[] = [];
 
   private currentMode: "plane" | "spherical" = "plane";
@@ -139,9 +153,10 @@ export class CompressionTrackerNode extends Node {
     const triangleShape = new Shape().moveTo(-TRIANGLE_HALF_WIDTH, -TRIANGLE_HEIGHT).lineTo(TRIANGLE_HALF_WIDTH, -TRIANGLE_HEIGHT).lineTo(0, 0).close();
     for (let i = 0; i < MAX_TRACKED_COMPRESSIONS; i++) {
       this.planeMarkers.push(new Path(triangleShape, { fill: null, stroke: MARKER_STROKE, lineWidth: MARKER_LINE_WIDTH, visible: false }));
+      this.planeMarkerLines.push(new Line(0, -MARKER_LINE_HALF_HEIGHT, 0, MARKER_LINE_HALF_HEIGHT, { stroke: MARKER_STROKE, lineWidth: MARKER_LINE_WIDTH, lineDash: RING_LINE_DASH, visible: false }));
       this.sphericalMarkers.push(new Circle(1, { stroke: MARKER_STROKE, lineWidth: RING_LINE_WIDTH, lineDash: RING_LINE_DASH, fill: null, visible: false, x: this.sphericalOriginX, y: this.sphericalOriginY }));
     }
-    this.children = [...this.planeMarkers, ...this.sphericalMarkers];
+    this.children = [...this.planeMarkerLines, ...this.planeMarkers, ...this.sphericalMarkers];
 
     Multilink.multilink([this.viewZoomProperty, model.propagationModeProperty], () => this.onGeometryChange());
   }
@@ -157,6 +172,9 @@ export class CompressionTrackerNode extends Node {
     this.currentMode = this.model.propagationModeProperty.value;
     for (const marker of this.planeMarkers) {
       marker.visible = false;
+    }
+    for (const line of this.planeMarkerLines) {
+      line.visible = false;
     }
     for (const marker of this.sphericalMarkers) {
       marker.visible = false;
@@ -181,12 +199,17 @@ export class CompressionTrackerNode extends Node {
 
       for (let i = 0; i < this.planeMarkers.length; i++) {
         const marker = this.planeMarkers[i];
+        const line = this.planeMarkerLines[i];
         if (i < positions.length) {
           marker.visible = true;
           marker.x = this.planeOriginX + positions[i] * pixelsPerMeter;
           marker.y = this.planeOriginY - TRIANGLE_Y_OFFSET;
+          line.visible = true;
+          line.x = marker.x;
+          line.y = this.planeOriginY;
         } else {
           marker.visible = false;
+          line.visible = false;
         }
       }
       for (const marker of this.sphericalMarkers) {
@@ -218,6 +241,9 @@ export class CompressionTrackerNode extends Node {
       }
       for (const marker of this.planeMarkers) {
         marker.visible = false;
+      }
+      for (const line of this.planeMarkerLines) {
+        line.visible = false;
       }
     }
   }

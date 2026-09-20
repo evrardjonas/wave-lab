@@ -178,10 +178,34 @@ function computeRingCount(maxRadiusMeters: number, minWavelength: number): numbe
 // model.sampleAtRadius(r) + redrawSpherical() this file already uses for the ring layout - only WHERE
 // the equilibrium positions come from differs (a rectangular sweep instead of a polar one).
 //
-// Particle budget kept the same order of magnitude as MAX_SPHERICAL_PARTICLES above (19*19=361 <= 380)
-// so switching zoom doesn't change the rendering cost much, mirroring that constant's own reasoning.
-const MAX_FIELD_GRID_SIDE = 19;
+// User testing found the Field-zoom grid reading as too sparse/small at a glance - raised from the
+// original 19 (361 particles, matched to MAX_SPHERICAL_PARTICLES's 380 order of magnitude) to 25 (625
+// particles), then to 56 (3136 particles, ~5x that, per a further explicit density request) for a
+// visibly denser grid. computeFieldGridSide()'s own raw formula already asks for far more than any of
+// these caps at this sim's actual Field-zoom width/frequency range (e.g. ceil(1+3*(16/0.686))=71 at
+// FREQUENCY_RANGE.max), so this constant - not the formula - is what actually determines Field zoom's
+// particle count in practice.
+//
+// BUG FIX: raising this past MAX_SPHERICAL_PARTICLES (380, the SEPARATE polar-ring layout's own budget -
+// see that constant's comment) used to silently truncate the grid, and asymmetrically: rebuildSphericalGrid
+// below fills row-by-row (row 0 = top of the field, increasing row = further down-screen), and its inner
+// loop's `break` on hitting a particle-count cap only exited the CURRENT row's column loop, not the outer
+// row loop - so once the cap was reached partway through some row, every subsequent row's inner loop
+// immediately broke again at column 0 (count was already >= cap), leaving the entire remainder of the grid
+// (everything below that row) with ZERO particles - a visibly missing bottom chunk, not a graceful thin-out.
+// Fixed by giving the grid its OWN dedicated budget (MAX_FIELD_GRID_PARTICLES below), sized to the largest
+// possible full square (MAX_FIELD_GRID_SIDE^2) so it can never truncate the grid it's supposed to bound -
+// unlike the ring layout, this grid is never shown at the same time as anything sharing MAX_SPHERICAL_
+// PARTICLES's budget, so decoupling the two costs nothing.
+const MAX_FIELD_GRID_SIDE = 56;
 const MIN_FIELD_GRID_SIDE = 6; // same floor reasoning as MIN_COLUMN_COUNT/MIN_RING_COUNT above
+
+// Dedicated particle-count safety net for rebuildSphericalGrid ONLY (see MAX_FIELD_GRID_SIDE's own "BUG
+// FIX" comment above for why this must be its own budget, not MAX_SPHERICAL_PARTICLES) - exactly the
+// largest possible full square, so a full MAX_FIELD_GRID_SIDE x MAX_FIELD_GRID_SIDE grid can structurally
+// never hit this cap (it's a defensive floor for a future change to computeFieldGridSide's clamp, not a
+// budget meant to ever actually bind today).
+const MAX_FIELD_GRID_PARTICLES = MAX_FIELD_GRID_SIDE * MAX_FIELD_GRID_SIDE;
 
 // Small fixed (assigned once, never animated) per-particle jitter in both x and y - the Cartesian
 // analogue of SPHERICAL_RADIAL_JITTER_MAX/SPHERICAL_ANGULAR_JITTER_MAX below, same magnitude/purpose
@@ -242,14 +266,21 @@ const SPHERICAL_VISUAL_TARGET_NEAR_SOURCE_PX = 12; // px, see computeSphericalBa
  * function returns baseScale=1 (no boost applied) and the excursion is simply whatever the RAW physical
  * amplitude already was - i.e. exactly what redrawSpherical() would have drawn before this boost existed,
  * so that branch introduces no NEW margin risk of its own.
- * Checked against this sim's actual constants (AMPLITUDE_SAFETY_FRACTION=0.7, SPHERICAL_SOURCE_RADIUS=
- * 0.15m, FREQUENCY_RANGE=[100,500]Hz, SPHERICAL_FIELD_PIXEL_WIDTH=420px): Amax*pixelsPerMeter's own
- * maximum across every (frequency, zoom) combination is ~8.65px (100Hz, Local zoom) - comfortably under
- * TARGET=12px - so today TARGET genuinely is the live ceiling everywhere. This is NOT a general
- * mathematical guarantee, though: if SPHERICAL_FIELD_PIXEL_WIDTH, AMPLITUDE_SAFETY_FRACTION,
- * FREQUENCY_RANGE.min, or SPHERICAL_SOURCE_RADIUS ever change, re-check that Amax*pixelsPerMeter stays
- * under TARGET_PX at FREQUENCY_RANGE's most permissive end (lowest frequency, largest amplitude cap) -
- * that's the only way this ceiling could silently stop holding.
+ * UPDATE (SPHERICAL_SOURCE_RADIUS raised 0.15m -> 0.4m, user request for a higher spherical amplitude
+ * cap): this is exactly the "silently stop holding" case the note above warned about.
+ * Checked against this sim's CURRENT constants (SPHERICAL_AMPLITUDE_SAFETY_FRACTION=0.85,
+ * SPHERICAL_SOURCE_RADIUS=0.4m, FREQUENCY_RANGE=[100,500]Hz, SPHERICAL_FIELD_PIXEL_WIDTH=420px):
+ * Amax*pixelsPerMeter's own maximum across every (frequency, zoom) combination is now ~20.6px (100Hz,
+ * Local zoom) - ABOVE TARGET_PX=12px, so at that end of the frequency range this function returns
+ * baseScale=1 (no boost) and the true worst-case excursion at the source is that raw ~20.6px, not 12px.
+ * This is still SAFE (comfortably under the field's ~37px+ margins - see SPHERICAL_FIELD_PIXEL_WIDTH's own
+ * comment - and far short of the 210px field radius itself), just no longer capped at exactly TARGET_PX;
+ * the general worst-case formula (max(Amax*pixelsPerMeter, TARGET_PX)*sqrt(r0/r), from this function's own
+ * doc comment above) already covers this branch correctly, it just now actually gets exercised at the low
+ * end of FREQUENCY_RANGE instead of TARGET_PX always winning. If SPHERICAL_FIELD_PIXEL_WIDTH,
+ * SPHERICAL_AMPLITUDE_SAFETY_FRACTION, FREQUENCY_RANGE.min, or SPHERICAL_SOURCE_RADIUS ever change again,
+ * RE-CHECK this worst-case number against the field's actual layout margins (not against TARGET_PX, which
+ * is no longer the binding constraint at every setting).
  */
 function computeSphericalBaseScale(maxSourceAmplitude: number, pixelsPerMeter: number): number {
   return maxSourceAmplitude > 0 ? Math.max(1, SPHERICAL_VISUAL_TARGET_NEAR_SOURCE_PX / (maxSourceAmplitude * pixelsPerMeter)) : 1;
@@ -663,7 +694,7 @@ export class ParticleFieldNode extends Node {
     let particleIndex = 0;
     for (let row = 0; row < gridSide; row++) {
       for (let column = 0; column < gridSide; column++) {
-        if (this.particles.length >= MAX_SPHERICAL_PARTICLES) {
+        if (this.particles.length >= MAX_FIELD_GRID_PARTICLES) {
           break;
         }
 

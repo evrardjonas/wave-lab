@@ -8,6 +8,7 @@ import {
   AMPLITUDE_SAFETY_FRACTION,
   DOMAIN_LENGTH,
   FREQUENCY_RANGE,
+  SPHERICAL_AMPLITUDE_SAFETY_FRACTION,
   SPHERICAL_SOURCE_RADIUS,
   SoundWavesModel,
   strictAmplitudeBound,
@@ -56,14 +57,21 @@ function widestPossibleAmplitudeRange(speedOfSound: number): Range {
 // function's doc comment in SoundWavesModel.ts) rather than strictAmplitudeBound.
 function widestPossibleSphericalAmplitudeRange(speedOfSound: number): Range {
   const widestWavelength = wavelength(speedOfSound, FREQUENCY_RANGE.min);
-  return new Range(0, AMPLITUDE_SAFETY_FRACTION * strictRadialAmplitudeBound(widestWavelength, SPHERICAL_SOURCE_RADIUS));
+  return new Range(0, SPHERICAL_AMPLITUDE_SAFETY_FRACTION * strictRadialAmplitudeBound(widestWavelength, SPHERICAL_SOURCE_RADIUS));
 }
 
 export type ControlPanelOptions = {
   showPressureGraphProperty: BooleanProperty;
   showRulerProperty: BooleanProperty;
+  // Backs the "Show wavefront" checkbox below - despite the name, this is the SAME Property/mechanism
+  // that used to drive a "Show compression tracker" checkbox (CompressionTrackerNode's periodic,
+  // one-wavelength-spaced markers). Renamed per user testing: the standalone single-leading-edge
+  // WavefrontMarkerNode this sim used to also have was removed (its marker crossed the visible domain in
+  // under one animation frame at Normal playback speed - real sound genuinely travels that fast relative
+  // to this sim's few-meter domain - so it was only visible for a fraction of a frame, effectively
+  // non-functional at the sim's default speed), and CompressionTrackerNode's outermost marker already
+  // reads as "the wavefront" in practice (only 1-2 markers are ever visible at Local zoom's default view).
   showCompressionTrackerProperty: BooleanProperty;
-  showWavefrontProperty: BooleanProperty;
   colorEnabledProperty: BooleanProperty;
 };
 
@@ -236,9 +244,21 @@ export class ControlPanel extends Panel {
 
     // ---- Opt-in overlays (default off) ----
 
+    // WORDING FIX: this checkbox now also controls PressureIsometricMapNode (SoundWavesScreenView.ts), a
+    // spherical-mode pressure visualization added once this label's own former "Only available for the
+    // plane wave" wording would otherwise have been actively wrong - see that file's class doc.
     const pressureGraphCheckbox = new Checkbox(options.showPressureGraphProperty, new Text("Show pressure graph", { font: SECONDARY_LABEL_FONT }), {
       accessibleName: "Show pressure graph",
-      accessibleHelpText: "Displays a chart of pressure variation versus position, sharing the same axis as the particle field above it. Only available for the plane wave.",
+      accessibleHelpText:
+        "Displays a chart of pressure variation for the plane wave, or a 3D-style ripple map of the pressure field for the spherical wave, sharing data with the field shown above it.",
+    });
+    // PEDAGOGY-REVIEW FIX: every other opt-in checkbox below (rulerCheckbox, compressionTrackerCheckbox)
+    // pairs with a visible on-screen caption, so a sighted student sees the same caveat a screen-reader
+    // user gets from accessibleHelpText above - this checkbox was the one exception.
+    const pressureGraphCaption = new RichText("Shows a pressure chart for the plane wave, or a 3D-style pressure map for the spherical wave.", {
+      font: CAPTION_FONT,
+      fill: "#707070",
+      lineWrap: PANEL_WIDTH - 20,
     });
 
     const rulerCheckbox = new Checkbox(options.showRulerProperty, new Text("Show ruler", { font: SECONDARY_LABEL_FONT }), {
@@ -251,13 +271,16 @@ export class ControlPanel extends Panel {
       lineWrap: PANEL_WIDTH - 20,
     });
 
-    const compressionTrackerCheckbox = new Checkbox(options.showCompressionTrackerProperty, new Text("Show compression tracker", { font: SECONDARY_LABEL_FONT }), {
-      accessibleName: "Show compression tracker",
+    // Labeled "Show wavefront" (renamed from "Show compression tracker" - see ControlPanelOptions'
+    // showCompressionTrackerProperty doc comment for why) - CompressionTrackerNode's mechanism and physics
+    // are completely unchanged, only this checkbox's user-facing label/description changed.
+    const compressionTrackerCheckbox = new Checkbox(options.showCompressionTrackerProperty, new Text("Show wavefront", { font: SECONDARY_LABEL_FONT }), {
+      accessibleName: "Show wavefront",
       accessibleHelpText:
-        "Marks the current position of each compression; the spacing between marks is one wavelength. This marker is a bookkeeping tool, not a moving particle or a gust of wind.",
+        "Marks how far the wave has traveled - one marker per compression, repeating every wavelength as the disturbance spreads. This marker is a bookkeeping tool, not a moving particle or a gust of wind.",
     });
     const compressionTrackerCaption = new RichText(
-      "Marks each compression's position — the spacing between marks is one wavelength. This marker is a bookkeeping tool, not a moving particle or a gust of wind.",
+      "Marks how far the wave has traveled, repeating every wavelength — not a moving particle or a gust of wind.",
       {
         font: CAPTION_FONT,
         fill: "#707070",
@@ -265,27 +288,13 @@ export class ControlPanel extends Panel {
       },
     );
 
-    // Distinct from compressionTrackerCheckbox above: this marks the SINGLE leading edge of the
-    // disturbance, not every periodic compression - see WavefrontMarkerNode.ts's own class doc for why
-    // this is a separate component rather than a mode of CompressionTrackerNode.
-    const wavefrontCheckbox = new Checkbox(options.showWavefrontProperty, new Text("Show wavefront", { font: SECONDARY_LABEL_FONT }), {
-      accessibleName: "Show wavefront",
-      accessibleHelpText: "Marks how far the wave has traveled from the source so far - a single marker at the leading edge, not the repeating compressions the compression tracker marks.",
-    });
-    const wavefrontCaption = new RichText("Marks the leading edge of the disturbance - how far the wave has traveled so far.", {
-      font: CAPTION_FONT,
-      fill: "#707070",
-      lineWrap: PANEL_WIDTH - 20,
-    });
-
     const overlaysContent = new VBox({
       spacing: 8,
       align: "left",
       children: [
-        pressureGraphCheckbox,
+        new VBox({ spacing: 2, align: "left", children: [pressureGraphCheckbox, pressureGraphCaption] }),
         new VBox({ spacing: 2, align: "left", children: [rulerCheckbox, rulerCaption] }),
         new VBox({ spacing: 2, align: "left", children: [compressionTrackerCheckbox, compressionTrackerCaption] }),
-        new VBox({ spacing: 2, align: "left", children: [wavefrontCheckbox, wavefrontCaption] }),
       ],
     });
 

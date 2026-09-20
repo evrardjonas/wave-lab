@@ -227,6 +227,24 @@ export function strictRadialAmplitudeBound(wavelength: number, sourceRadius: num
 // compression/rarefaction effect at the top of the amplitude range.
 export const AMPLITUDE_SAFETY_FRACTION = 0.7;
 
+// User testing asked for spherical mode to reach amplitudes "just as high" as the plane wave. Raising
+// THIS fraction alone can't do that: strictRadialAmplitudeBound's extra 1/SPHERICAL_SOURCE_RADIUS term
+// (see that function's own doc comment) is a GENUINE, physically-derived constraint - not an arbitrary
+// limit - so the spherical cap stays below the plane cap regardless of the safety fraction used. What IS
+// a safe, physics-preserving improvement: this sim's ordering proof requires strictly LESS than 1 at the
+// boundary, and AMPLITUDE_SAFETY_FRACTION's own doc comment already explains 0.7 was a deliberately
+// conservative choice (30% margin) shared by both modes. Since spherical mode's cap is smaller to begin
+// with, it can afford to use a less conservative margin without meaningfully increasing the practical
+// risk of a visually-touching edge case (the same discretization/floating-point concerns
+// AMPLITUDE_SAFETY_FRACTION's doc comment describes scale with the ABSOLUTE amplitude value, which stays
+// smaller here even at this less conservative fraction). Plane mode's own AMPLITUDE_SAFETY_FRACTION above
+// is deliberately untouched. The REST of the gap (raising this fraction only recovers so much - e.g. at
+// 250Hz even pushed to 0.95 the spherical cap is still only ~55% of the plane cap at the OLD
+// SPHERICAL_SOURCE_RADIUS=0.15m) was closed separately by raising SPHERICAL_SOURCE_RADIUS itself (see
+// that constant's own doc comment) once the user confirmed the resulting bigger point-source icon was an
+// acceptable tradeoff.
+export const SPHERICAL_AMPLITUDE_SAFETY_FRACTION = 0.85;
+
 // Default amplitude (m, of the EXAGGERATED visualization - see the class doc and HowThisWorksDialog,
 // not a real acoustic displacement). Chosen to stay comfortably under the live amplitude cap across
 // the ENTIRE frequency range (the tightest cap, at FREQUENCY_RANGE.max, is
@@ -238,12 +256,21 @@ const DEFAULT_AMPLITUDE = 0.03; // m
 // ---- Spherical mode ----
 
 // Finite "source radius" (m) standing in for the point source in spherical mode - see the class doc's
-// SPHERICAL MODE paragraph. Small enough to look like a point at either zoom level (see
-// ParticleFieldNode.ts's PIXELS_PER_METER values - even at "Local" zoom's largest px/m, 0.15 m is a
-// modest ~22px radius icon) but visually distinguishable (not a mathematical point), and, more
-// importantly, large enough that sphericalAmplitudeAtRadius/strictRadialAmplitudeBound below never
-// have to divide by something close to zero.
-export const SPHERICAL_SOURCE_RADIUS = 0.15; // m
+// SPHERICAL MODE paragraph, and, more importantly, large enough that sphericalAmplitudeAtRadius/
+// strictRadialAmplitudeBound below never have to divide by something close to zero.
+//
+// USER REQUEST: raised from 0.15m to 0.4m specifically to shrink the gap between spherical mode's
+// amplitude cap and plane mode's - see SPHERICAL_AMPLITUDE_SAFETY_FRACTION's own doc comment for why
+// raising that fraction alone could only ever close part of the gap (strictRadialAmplitudeBound's extra
+// 1/SPHERICAL_SOURCE_RADIUS term dominates its denominator for any SMALL source radius, regardless of
+// safety fraction). Increasing this constant instead directly shrinks that term - at the default 250 Hz,
+// the spherical cap goes from ~41% of the plane cap (at the old 0.15m) to ~78% (at 0.4m); at
+// FREQUENCY_RANGE.min=100Hz (the widest-gap end, since 1/r0 matters relatively more at longer
+// wavelengths - see strictRadialAmplitudeBound's own doc comment) it goes from ~30% to ~51%. Tradeoff:
+// PointSourceNode's icon radius (LoudspeakerNode.ts) is exactly SPHERICAL_SOURCE_RADIUS*pixelsPerMeter,
+// so the "point" source's on-screen icon is correspondingly bigger too (~42px radius at Local zoom, up
+// from ~16px) - a deliberate, accepted tradeoff, not an oversight.
+export const SPHERICAL_SOURCE_RADIUS = 0.4; // m
 
 // Default amplitude AT the source radius (m, exaggerated visualization, same convention as
 // DEFAULT_AMPLITUDE) for spherical mode's sphericalAmplitudeProperty. Chosen the same way
@@ -434,7 +461,9 @@ export class SoundWavesModel {
   private readonly amplitudeRangeProperty: Property<Range>;
 
   // Same pattern as amplitudeRangeProperty above, but for sphericalAmplitudeProperty, tracking
-  // AMPLITUDE_SAFETY_FRACTION * strictRadialAmplitudeBound(lambda, SPHERICAL_SOURCE_RADIUS) instead.
+  // SPHERICAL_AMPLITUDE_SAFETY_FRACTION * strictRadialAmplitudeBound(lambda, SPHERICAL_SOURCE_RADIUS)
+  // instead - see that constant's own doc comment for why spherical mode uses a DIFFERENT (less
+  // conservative) safety fraction than plane mode's AMPLITUDE_SAFETY_FRACTION.
   private readonly sphericalAmplitudeRangeProperty: Property<Range>;
 
   // ---- Derived (read-only) Properties ----
@@ -578,7 +607,7 @@ export class SoundWavesModel {
 
   private static computeSphericalAmplitudeRange(speedOfSound: number, frequency: number): Range {
     const lambda = wavelength(speedOfSound, frequency);
-    return new Range(0, AMPLITUDE_SAFETY_FRACTION * strictRadialAmplitudeBound(lambda, SPHERICAL_SOURCE_RADIUS));
+    return new Range(0, SPHERICAL_AMPLITUDE_SAFETY_FRACTION * strictRadialAmplitudeBound(lambda, SPHERICAL_SOURCE_RADIUS));
   }
 
   /**
@@ -605,19 +634,6 @@ export class SoundWavesModel {
     const retardedTime = this.simulationTime - r / this.speedOfSoundProperty.value;
     const amplitudeAtThisRadius = sphericalAmplitudeAtRadius(this.sphericalAmplitudeProperty.value, SPHERICAL_SOURCE_RADIUS, r);
     return this.sampleAtRetardedDistance(retardedTime, amplitudeAtThisRadius);
-  }
-
-  /**
-   * Distance (m) the wavefront has traveled from the source since t=0 - exactly c*simulationTime, the
-   * direct physical meaning of this class's own retarded-time clock (a point at distance x is still at
-   * rest iff x > this value - see sampleAtRetardedDistance()'s retardedTime<=0 branch, which is exactly
-   * the same condition x/c > simulationTime rearranged). Used by the "Show wavefront" overlay (a single
-   * marker at the leading edge) - a distinct concept from the compression tracker (which marks every
-   * individual periodic compression, not just the leading edge). Identical meaning in both propagation
-   * modes (a radius in spherical mode, an x-position in plane mode) since both share this same clock.
-   */
-  public getWavefrontDistance(): number {
-    return this.simulationTime * this.speedOfSoundProperty.value;
   }
 
   /**

@@ -8,6 +8,7 @@ import {
   MAX_SUPPORTED_DISTANCE,
   PRESSURE_SAMPLE_COUNT,
   PROBE_POSITION_METERS,
+  SPHERICAL_AMPLITUDE_SAFETY_FRACTION,
   SPHERICAL_SOURCE_RADIUS,
   SoundWavesModel,
   angularFrequency,
@@ -370,13 +371,8 @@ describe("retarded-time / finite propagation speed", () => {
   });
 });
 
-describe("getWavefrontDistance", () => {
-  it("stays at 0 before any stepping", () => {
-    const model = new SoundWavesModel();
-    expect(model.getWavefrontDistance()).toBe(0);
-  });
-
-  it("advances as speedOfSound * elapsed time, matching sampleAt's own at-rest/active boundary exactly", () => {
+describe("wavefront at-rest/active boundary (retardedTime<=0 gating, shared by both modes)", () => {
+  it("a point just beyond speedOfSound*elapsedTime stays exactly at rest; a point just before it is active", () => {
     const model = new SoundWavesModel();
     const dt = 1 / 2000;
     const steps = 500; // 0.25 s of model time
@@ -384,16 +380,9 @@ describe("getWavefrontDistance", () => {
       model.step(dt);
     }
 
-    const expectedDistance = model.speedOfSoundProperty.value * (steps * dt);
-    expect(model.getWavefrontDistance()).toBeCloseTo(expectedDistance, 6);
-
-    // Consistency check against the model's OWN physical definition of "has the wavefront arrived",
-    // not just the formula in isolation: a point just short of the wavefront distance must already be
-    // active (though possibly still ramping in), and a point just beyond it must be exactly at rest
-    // (retardedTime<=0 in sampleAtRetardedDistance's own gating - see the class doc).
-    const distance = model.getWavefrontDistance();
-    const wellBefore = model.sampleAt(distance - 1); // comfortably past the ramp-in, unambiguously active
-    const justBeyond = model.sampleAt(distance + 0.01);
+    const wavefrontDistance = model.speedOfSoundProperty.value * (steps * dt);
+    const wellBefore = model.sampleAt(wavefrontDistance - 1); // comfortably past the ramp-in, unambiguously active
+    const justBeyond = model.sampleAt(wavefrontDistance + 0.01);
     expect(justBeyond).toEqual({ displacement: 0, velocity: 0, pressure: 0 });
     expect(wellBefore).not.toEqual({ displacement: 0, velocity: 0, pressure: 0 });
   });
@@ -406,17 +395,8 @@ describe("getWavefrontDistance", () => {
       model.step(dt);
     }
 
-    const distance = model.getWavefrontDistance();
-    expect(model.sampleAtRadius(distance + 0.01)).toEqual({ displacement: 0, velocity: 0, pressure: 0 });
-  });
-
-  it("resets to 0 along with the rest of the model's clock state", () => {
-    const model = new SoundWavesModel();
-    model.step(0.05);
-    expect(model.getWavefrontDistance()).toBeGreaterThan(0);
-
-    model.reset();
-    expect(model.getWavefrontDistance()).toBe(0);
+    const wavefrontDistance = model.speedOfSoundProperty.value * (300 * dt);
+    expect(model.sampleAtRadius(wavefrontDistance + 0.01)).toEqual({ displacement: 0, velocity: 0, pressure: 0 });
   });
 });
 
@@ -560,9 +540,9 @@ describe("strictRadialAmplitudeBound", () => {
 });
 
 describe("sphericalAmplitudeProperty range constraint tracks frequency live (stricter than the plane cap)", () => {
-  it("cap exactly equals AMPLITUDE_SAFETY_FRACTION * strictRadialAmplitudeBound(wavelength, SPHERICAL_SOURCE_RADIUS)", () => {
+  it("cap exactly equals SPHERICAL_AMPLITUDE_SAFETY_FRACTION * strictRadialAmplitudeBound(wavelength, SPHERICAL_SOURCE_RADIUS)", () => {
     const model = new SoundWavesModel();
-    const expectedCap = AMPLITUDE_SAFETY_FRACTION * strictRadialAmplitudeBound(model.wavelengthProperty.value, SPHERICAL_SOURCE_RADIUS);
+    const expectedCap = SPHERICAL_AMPLITUDE_SAFETY_FRACTION * strictRadialAmplitudeBound(model.wavelengthProperty.value, SPHERICAL_SOURCE_RADIUS);
     expect(model.sphericalAmplitudeProperty.range.max).toBeCloseTo(expectedCap, 10);
   });
 

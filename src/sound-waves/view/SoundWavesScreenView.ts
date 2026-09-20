@@ -7,9 +7,9 @@ import { SoundWavesModel } from "../model/SoundWavesModel.js";
 import { ParticleFieldNode, pixelsPerMeterForZoom, sphericalPixelsPerMeterForZoom, type ViewZoom } from "./ParticleFieldNode.js";
 import { LoudspeakerNode, PointSourceNode } from "./LoudspeakerNode.js";
 import { PressureGraphNode } from "./PressureGraphNode.js";
+import { PressureIsometricMapNode } from "./PressureIsometricMapNode.js";
 import { PressureFieldNode } from "./PressureFieldNode.js";
 import { CompressionTrackerNode } from "./CompressionTrackerNode.js";
-import { WavefrontMarkerNode } from "./WavefrontMarkerNode.js";
 import { ControlPanel } from "./ControlPanel.js";
 import { HowThisWorksDialog } from "./HowThisWorksDialog.js";
 import { ZoomControl } from "./ZoomControl.js";
@@ -96,6 +96,38 @@ const SPHERICAL_ORIGIN_X = 350;
 const SPHERICAL_ORIGIN_Y = 385;
 const TOP_CHROME_ROW_GAP = 6; // px, vertical gap between the two top chrome rows - see the arithmetic above
 
+// ---- PressureIsometricMapNode placement (spherical-mode-only pseudo-3D ridge plot of the pressure field -
+// see that file's own class doc) ----
+//
+// MEASURED IN A REAL BROWSER (not estimated - the two numbers below replace an earlier version of this
+// comment that assumed ControlPanel had a fixed 250px width and a much shorter caption; both assumptions
+// were wrong, see the two bugs this fixes):
+//  - ControlPanel's actual rendered width is ~281.5px, not its PANEL_WIDTH=250 minWidth - some of its
+//    content (not investigated further here) forces it wider than the minimum, so controlPanel.left sits
+//    at ~726.5px (1008-281.5), not the previously-assumed 758px. The spherical field's right edge is still
+//    exactly SPHERICAL_ORIGIN_X+210=560px (fixed, see ParticleFieldNode.ts's SPHERICAL_FIELD_PIXEL_WIDTH).
+//    That leaves a real free strip of only ~166px wide (x:[560, 726.5]), not the ~185px this file used to
+//    assume - BUG: the original x0=575/PLOT_WIDTH=125 placement left only ~3.6px of clearance to the
+//    panel's actual left edge, not the intended margin.
+//  - PressureIsometricMapNode's caption (see that file's CAPTION_TEXT, expanded during physics/pedagogy
+//    re-review to cover several required caveats) is taller than the "well under 250px tall" estimate this
+//    comment used to make - measured content bottom (plot+gap+caption) reached logical y~=675.5, overflowing
+//    the 618px-tall stage by ~57.5px. BUG: y0=300 left no margin for the caption's real height.
+//
+// FIXED (both measured, not estimated, against SoundWavesModel's actual defaults):
+//  - PLOT_WIDTH was reduced (see PressureIsometricMapNode.ts) so this Node's total content width shrinks
+//    from ~148px to ~123px, and x0 moved to 572 (12px clear of the field's 560px right edge). Content right
+//    edge lands at ~572+123=695px, ~31.5px clear of the panel's real 726.5px left edge - a real, comfortable
+//    margin instead of the previous 3.6px.
+//  - y0 moved from 300 to 190, so the caption's real measured bottom (previously 675.5 at y0=300, i.e.
+//    375.5px below y0) now lands at ~190+375.5=565.5px - comfortably inside the stage's 618px bottom (52.5px
+//    margin) instead of overflowing it.
+// STILL FLAGGED FOR VISUAL RE-VERIFICATION if either ControlPanel.ts's content or PressureIsometricMapNode's
+// caption text changes again in the future - both numbers above are anchored to a specific measured render,
+// not derived from a formula that stays correct automatically.
+const ISOMETRIC_MAP_X0 = 572;
+const ISOMETRIC_MAP_Y0 = 190;
+
 // RulerNode's rulerWidth/majorTickWidth/labels are plain constructor parameters, not reactive Properties
 // (see the installed source - no way to re-calibrate one RulerNode instance after construction), so
 // Local and Field zoom each get their OWN RulerNode instance below (localRulerNode/fieldRulerNode),
@@ -161,13 +193,19 @@ const RESET_ALL_BUTTON_MARGIN = 10;
  *    a time, toggled directly off model.propagationModeProperty below - ParticleFieldNode/
  *    PressureFieldNode/CompressionTrackerNode each handle their own internal mode switch and so need no
  *    external visibility toggle.
- *  - Shared overlays (PressureFieldNode background shading, CompressionTrackerNode markers,
- *    WavefrontMarkerNode's single leading-edge marker) that read from whichever origin/mode is
- *    currently active.
+ *  - Shared overlays (PressureFieldNode background shading, CompressionTrackerNode markers - exposed to
+ *    the student as the "Show wavefront" checkbox, see ControlPanel.ts) that read from whichever
+ *    origin/mode is currently active.
  *  - PressureGraphNode, a PLANE-only precise pressure-vs-x chart - hidden outright in spherical mode
  *    (see pressureGraphVisibleProperty below), since it only ever samples the plane wave (model.sampleAt(x),
  *    never sampleAtRadius(r)). Zoom-aware like ParticleFieldNode/PressureFieldNode (shares this same
  *    viewZoomProperty) - see PressureGraphNode.ts's own class doc for the zoom-alignment bug fix.
+ *  - PressureIsometricMapNode, the SPHERICAL-mode mirror of PressureGraphNode above - a pseudo-3D "ridge
+ *    plot" of the SAME model.sampleAtRadius(r).pressure field PressureFieldNode's spherical shading and
+ *    CompressionTrackerNode already read, shown only in spherical mode (see
+ *    pressureIsometricMapVisibleProperty below) and sharing the SAME "Show pressure graph" checkbox/
+ *    Property as PressureGraphNode, not a second checkbox - see that file's own class doc for the
+ *    rendering technique and why it exists.
  *  - Stage-level chrome, TWO ROWS: row 1 groups every "what am I looking at" concern (InfoButton/
  *    HowThisWorksDialog, PropagationModeControl); row 2 holds ZoomControl alone, a secondary "how much
  *    do I see" concern. (Row 1 previously also held RepresentationModeControl, and the "Color"/
@@ -194,14 +232,23 @@ export class SoundWavesScreenView extends ScreenView {
   private readonly particleFieldNode: ParticleFieldNode;
   private readonly pressureFieldNode: PressureFieldNode;
   private readonly compressionTrackerNode: CompressionTrackerNode;
-  private readonly wavefrontMarkerNode: WavefrontMarkerNode;
   private readonly loudspeakerNode: LoudspeakerNode;
   private readonly pointSourceNode: PointSourceNode;
   private readonly pressureGraphNode: PressureGraphNode;
+  private readonly pressureIsometricMapNode: PressureIsometricMapNode;
   private readonly showPressureGraphProperty: BooleanProperty;
   private readonly showRulerProperty: BooleanProperty;
+  // DESIGN CHANGE: this Property now backs the "Show wavefront" checkbox (ControlPanel.ts), not "Show
+  // compression tracker" - the standalone WavefrontMarkerNode (a single leading-edge marker driven by
+  // model.getWavefrontDistance()) was removed. Real-time speed (343 m/s) crosses this sim's few-meter
+  // visible domain in under one frame at Normal playback speed, so that single marker was only ever
+  // visible for a fraction of a frame - effectively non-functional at the sim's default speed. The
+  // CompressionTrackerNode this Property already drove is kept as-is (same periodic, one-wavelength-
+  // spaced markers, same physics/functionality in both modes) and simply re-labeled - per user testing,
+  // its outermost marker already reads as "the wavefront" in practice (only 1-2 markers are ever visible
+  // at Local zoom's default view, see the sound-waves-revision-prompt.md section C discussion), so
+  // renaming it was preferred over trying to fix the timing-invisible standalone marker.
   private readonly showCompressionTrackerProperty: BooleanProperty;
-  private readonly showWavefrontProperty: BooleanProperty;
   private readonly colorEnabledProperty: BooleanProperty;
   private readonly viewZoomProperty: Property<ViewZoom>;
   private readonly rulerPositionProperty: Vector2Property;
@@ -213,7 +260,6 @@ export class SoundWavesScreenView extends ScreenView {
     this.showPressureGraphProperty = new BooleanProperty(false);
     this.showRulerProperty = new BooleanProperty(false);
     this.showCompressionTrackerProperty = new BooleanProperty(false);
-    this.showWavefrontProperty = new BooleanProperty(false);
     // Defaults to "local", which exactly reproduces this sim's original fixed-scale appearance (see
     // ParticleFieldNode.ts's FIELD_PIXEL_WIDTH doc) - so existing plane-wave behavior is unchanged unless
     // a student explicitly switches to "field".
@@ -251,15 +297,15 @@ export class SoundWavesScreenView extends ScreenView {
     // particle field and every other Node, per its own "purely decorative background" doc comment.
     this.pressureFieldNode = new PressureFieldNode(model, { ...fieldOrigins, colorEnabledProperty: this.colorEnabledProperty });
 
-    // CompressionTrackerNode and WavefrontMarkerNode are deliberately NOT given colorEnabledProperty -
-    // their treatment stays IDENTICAL regardless of Color (see CompressionTrackerNode's own class doc for
-    // why: bolding it in sync with a bold field risks reading as "discrete traveling objects riding along
-    // with solid stripes", exactly the misconception its own disclaimer text exists to prevent).
+    // CompressionTrackerNode is deliberately NOT given colorEnabledProperty - its treatment stays
+    // IDENTICAL regardless of Color (see CompressionTrackerNode's own class doc for why: bolding it in
+    // sync with a bold field risks reading as "discrete traveling objects riding along with solid
+    // stripes", exactly the misconception its own disclaimer text exists to prevent).
     this.particleFieldNode = new ParticleFieldNode(model, { ...fieldOrigins, colorEnabledProperty: this.colorEnabledProperty });
 
+    // Exposed to the student as "Show wavefront" (ControlPanel.ts), not "Show compression tracker" - see
+    // showCompressionTrackerProperty's own doc comment above for why.
     this.compressionTrackerNode = new CompressionTrackerNode(model, { ...fieldOrigins, visibleProperty: this.showCompressionTrackerProperty });
-
-    this.wavefrontMarkerNode = new WavefrontMarkerNode(model, { ...fieldOrigins, visibleProperty: this.showWavefrontProperty });
 
     // PressureGraphNode always reflects the plane wave's own fixed sample cache (see its own doc comment
     // and SoundWavesModel.ts's recomputeSamples) - shown only when BOTH the checkbox is on AND
@@ -272,11 +318,25 @@ export class SoundWavesScreenView extends ScreenView {
       viewZoomProperty: this.viewZoomProperty,
     });
 
+    // PressureIsometricMapNode is the SPHERICAL-mode mirror of pressureGraphVisibleProperty above - same
+    // showPressureGraphProperty/checkbox, just gated to the opposite propagationModeProperty value, so the
+    // one "Show pressure graph" checkbox always shows SOME pressure visualization regardless of mode (see
+    // that file's own "WHY THIS EXISTS" doc comment for the gap this closes).
+    const pressureIsometricMapVisibleProperty = new DerivedProperty(
+      [this.showPressureGraphProperty, model.propagationModeProperty],
+      (show, mode) => show && mode === "spherical",
+    );
+    this.pressureIsometricMapNode = new PressureIsometricMapNode(model, {
+      x0: ISOMETRIC_MAP_X0,
+      y0: ISOMETRIC_MAP_Y0,
+      visibleProperty: pressureIsometricMapVisibleProperty,
+      viewZoomProperty: this.viewZoomProperty,
+    });
+
     const controlPanel = new ControlPanel(model, {
       showPressureGraphProperty: this.showPressureGraphProperty,
       showRulerProperty: this.showRulerProperty,
       showCompressionTrackerProperty: this.showCompressionTrackerProperty,
-      showWavefrontProperty: this.showWavefrontProperty,
       colorEnabledProperty: this.colorEnabledProperty,
     });
     controlPanel.right = this.layoutBounds.maxX - 16;
@@ -455,8 +515,8 @@ export class SoundWavesScreenView extends ScreenView {
       this.loudspeakerNode,
       this.pointSourceNode,
       this.compressionTrackerNode,
-      this.wavefrontMarkerNode,
       this.pressureGraphNode,
+      this.pressureIsometricMapNode,
       propagationModeControl,
       zoomControl,
       controlPanel,
@@ -479,15 +539,14 @@ export class SoundWavesScreenView extends ScreenView {
     this.particleFieldNode.step();
     this.pressureFieldNode.step();
     this.compressionTrackerNode.step();
-    this.wavefrontMarkerNode.step();
     this.pressureGraphNode.step();
+    this.pressureIsometricMapNode.step();
   }
 
   public reset(): void {
     this.showPressureGraphProperty.reset();
     this.showRulerProperty.reset();
     this.showCompressionTrackerProperty.reset();
-    this.showWavefrontProperty.reset();
     this.colorEnabledProperty.reset();
     this.viewZoomProperty.reset();
     this.rulerPositionProperty.reset();

@@ -2,7 +2,7 @@ import { DerivedProperty } from "scenerystack/axon";
 import { RichText, Text, VBox } from "scenerystack/scenery";
 import { Dialog } from "scenerystack/sim";
 import { PhetFont } from "scenerystack/scenery-phet";
-import { AIR_DENSITY, AMPLITUDE_SAFETY_FRACTION, SPHERICAL_SOURCE_RADIUS, angularFrequency, SoundWavesModel, strictAmplitudeBound, strictRadialAmplitudeBound } from "../model/SoundWavesModel.js";
+import { AIR_DENSITY, AMPLITUDE_SAFETY_FRACTION, SPHERICAL_AMPLITUDE_SAFETY_FRACTION, SPHERICAL_SOURCE_RADIUS, angularFrequency, SoundWavesModel, strictAmplitudeBound, strictRadialAmplitudeBound } from "../model/SoundWavesModel.js";
 
 const TITLE_FONT = new PhetFont({ size: 18, weight: "bold" });
 const BODY_FONT = new PhetFont(14);
@@ -34,8 +34,11 @@ export class HowThisWorksDialog extends Dialog {
 
     const sphericalCapLineProperty = new DerivedProperty([model.wavelengthProperty], (wavelength) => {
       const strictRadialBound = strictRadialAmplitudeBound(wavelength, SPHERICAL_SOURCE_RADIUS);
-      const cap = AMPLITUDE_SAFETY_FRACTION * strictRadialBound;
-      return `Current strict bound: 1/(k + 1/r<sub>0</sub>) = ${strictRadialBound.toFixed(3)} m. Current allowed maximum: ${cap.toFixed(3)} m ` + `(stricter than the plane-wave bound above, since amplitude here also falls off with r).`;
+      const cap = SPHERICAL_AMPLITUDE_SAFETY_FRACTION * strictRadialBound;
+      return (
+        `Current strict bound: 1/(k + 1/r<sub>0</sub>) = ${strictRadialBound.toFixed(3)} m. Current allowed maximum (${SPHERICAL_AMPLITUDE_SAFETY_FRACTION * 100}% of that): ${cap.toFixed(3)} m ` +
+        `(still stricter than the plane-wave bound above, since amplitude here also falls off with r - see SPHERICAL_AMPLITUDE_SAFETY_FRACTION's own doc comment in SoundWavesModel.ts for why spherical mode can safely use a less conservative margin than plane mode's ${AMPLITUDE_SAFETY_FRACTION * 100}%).`
+      );
     });
 
     const content = new VBox({
